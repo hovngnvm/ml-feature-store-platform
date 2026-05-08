@@ -1,0 +1,8 @@
+project: fraud_feature_store
+registry: data/registry.pb
+provider: local
+offline_store:
+  type: file
+online_store:
+  type: sqlite
+  path: data/online_store.db
