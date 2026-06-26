@@ -1,67 +1,74 @@
 """
-Centralized Configuration Settings Module.
+System Settings & Centralized Configuration Module.
 
-Loads and validates environment variables from .env using Pydantic BaseSettings.
-Provides type-safe configuration parameters for Kafka, Redis, MinIO, and App logging.
+Provides single-source-of-truth for project paths, environment variables,
+and infrastructure connection parameters across all data pipelines.
 """
 
 import os
-from typing import Optional
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
+from dotenv import load_dotenv
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
+DOTENV_PATH = PROJECT_DIR / ".env"
+
+if DOTENV_PATH.exists():
+    load_dotenv(DOTENV_PATH)
+else:
+    load_dotenv()
 
 
-class Settings(BaseSettings):
-    """Application configuration settings loaded from environment variables."""
+class SystemSettings:
+    """Centralized Settings Instance container."""
 
-    # Project directory paths
-    project_dir: str = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    def __init__(self):
+        # Base System Paths
+        self.project_dir = str(PROJECT_DIR)
+        self.data_dir = str(PROJECT_DIR / "data")
+        self.model_dir = str(PROJECT_DIR / "models")
+        self.feature_repo_dir = str(PROJECT_DIR / "feature_repository")
+        self.dashboard_dir = str(PROJECT_DIR / "dashboards")
 
-    # Logging settings
-    log_level: str = "INFO"
+        # Lakehouse & Data Artifact Paths
+        self.lakehouse_base_dir = str(PROJECT_DIR / "data" / "lakehouse" / "batch_features")
+        self.dlq_dir = str(PROJECT_DIR / "data" / "lakehouse" / "dlq")
+        self.raw_csv_path = os.getenv("DATASET_PATH", str(PROJECT_DIR / "data" / "train_transaction.csv"))
+        self.batch_parquet_path = str(PROJECT_DIR / "data" / "batch_features.parquet")
+        self.ml_dataset_path = str(PROJECT_DIR / "data" / "ml_training_dataset.parquet")
+        self.raw_events_parquet_path = str(PROJECT_DIR / "data" / "raw_events_stream.parquet")
+        self.stream_dlq_parquet_path = str(PROJECT_DIR / "data" / "lakehouse" / "dlq" / "stream_errors.parquet")
 
-    # Kafka / Redpanda Stream Broker Configuration
-    kafka_broker: str = "localhost:19092"
-    kafka_topic: str = "raw_transactions"
-    kafka_dlq_topic: str = "raw_transactions_dlq"
-    kafka_consumer_group: str = "pyflink_feature_table_group"
+        # Machine Learning Artifact Paths
+        self.model_artifact_path = str(PROJECT_DIR / "models" / "ensemble_fraud_model.joblib")
+        self.report_json_path = str(PROJECT_DIR / "models" / "evaluation_report.json")
 
-    # Redis Online Feature Store Configuration
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_password: Optional[str] = None
-    redis_socket_timeout: float = 5.0
+        # Infrastructure Service Configurations
+        self.redis_host = os.getenv("REDIS_HOST", "localhost")
+        self.redis_port = int(os.getenv("REDIS_PORT", 6379))
 
-    # MinIO S3 Offline Feature Store Configuration
-    minio_endpoint: str = "localhost:9000"
-    minio_access_key: str = "minioadmin"
-    minio_secret_key: str = "minioadminpassword"
-    minio_bucket: str = "feature-store-offline"
-    minio_secure: bool = False
+        self.kafka_broker = os.getenv("KAFKA_BROKER", "localhost:19092")
+        self.kafka_topic = os.getenv("KAFKA_TOPIC", "raw_transactions")
+        self.kafka_dlq_topic = os.getenv("KAFKA_DLQ_TOPIC", "raw_transactions_dlq")
 
-    # Application Ports
-    fastapi_port: int = 8000
-    streamlit_port: int = 8501
-    prometheus_metrics_port: int = 9091
+        self.minio_endpoint = os.getenv("MINIO_ENDPOINT", "localhost:9000").replace("http://", "").replace("https://", "")
+        self.minio_access_key = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+        self.minio_secret_key = os.getenv("MINIO_SECRET_KEY", "minioadminpassword")
+        self.minio_bucket = os.getenv("MINIO_BUCKET", "feature-store-offline")
 
-    # Default Data Paths
-    dataset_path: str = ""
+        # Fraud Decision & Cost Matrix Parameters
+        self.default_fp_cost = float(os.getenv("DEFAULT_FP_COST", 2.0))
+        self.default_decision_threshold = float(os.getenv("DEFAULT_DECISION_THRESHOLD", 0.5))
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-        case_sensitive=False
-    )
-
-    def get_dataset_path(self) -> str:
-        """Returns default dataset path if not explicitly provided in environment."""
-        if self.dataset_path:
-            return self.dataset_path
-        return os.path.join(self.project_dir, "data", "train_transaction.csv")
+        # Auto-bootstrap runtime directory structure
+        for path_obj in (
+            PROJECT_DIR / "data",
+            PROJECT_DIR / "models",
+            PROJECT_DIR / "dashboards",
+            PROJECT_DIR / "data" / "lakehouse" / "batch_features",
+            PROJECT_DIR / "data" / "lakehouse" / "dlq"
+        ):
+            path_obj.mkdir(parents=True, exist_ok=True)
 
 
-# Global singleton settings instance
-settings = Settings()
+settings = SystemSettings()
+
