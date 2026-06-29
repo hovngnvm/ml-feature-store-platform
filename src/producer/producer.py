@@ -1,33 +1,29 @@
+"""
+High-Frequency Redpanda / Kafka Transaction Stream Producer.
+
+Simulates real-time transaction events, normal purchase patterns, fraud bursts,
+and corrupt test payloads for DLQ side output testing.
+"""
+
 import os
 import sys
 import time
 import json
 import random
-import logging
 import argparse
 from datetime import datetime, timezone
 import pandas as pd
 from dotenv import load_dotenv
 from kafka import KafkaProducer
 
+from src.config.settings import settings
+from src.utils.logger import get_logger
+
 load_dotenv()
+logger = get_logger("producer")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger("producer")
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:19092")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "raw_transactions")
-DEFAULT_DATASET_PATH = os.getenv(
-    "DATASET_PATH",
-    os.path.join(PROJECT_DIR, "data", "train_transaction.csv")
-)
-
-def create_stream_producer(broker_address: str):
+def create_stream_producer(broker_address: str) -> KafkaProducer:
     try:
         producer = KafkaProducer(
             bootstrap_servers=[broker_address],
@@ -43,18 +39,18 @@ def create_stream_producer(broker_address: str):
         logger.error(f"Failed to create Stream producer at {broker_address}: {e}")
         sys.exit(1)
 
+
 def format_event(row: pd.Series, base_time: float = None, inject_corrupt: bool = False) -> dict:
     if inject_corrupt:
-        # Corrupt test event with invalid amount or card_id
         corrupt_type = random.choice(["invalid_amount", "invalid_card", "null_card"])
         if corrupt_type == "invalid_amount":
             card_id = str(int(row["card1"])) if pd.notnull(row.get("card1")) else "11556"
-            amount = -999.0  # Invalid negative amount
+            amount = -999.0
         elif corrupt_type == "invalid_card":
             card_id = "unknown_card"
             amount = float(row["TransactionAmt"]) if pd.notnull(row.get("TransactionAmt")) else 100.0
         else:
-            card_id = ""  # Empty string card_id
+            card_id = ""
             amount = float(row["TransactionAmt"]) if pd.notnull(row.get("TransactionAmt")) else 100.0
             
         dt_offset = float(row.get("TransactionDT", 0))
@@ -100,6 +96,7 @@ def format_event(row: pd.Series, base_time: float = None, inject_corrupt: bool =
         "c1": float(row["C1"]) if pd.notnull(row.get("C1")) else 0.0,
         "c2": float(row["C2"]) if pd.notnull(row.get("C2")) else 0.0
     }
+
 
 def generate_synthetic_event(
     transaction_id: int,
@@ -166,15 +163,16 @@ def generate_synthetic_event(
         "c2": c2
     }
 
+
 def stream_transactions(
-    dataset_path: str,
-    broker: str,
-    topic: str,
-    limit: int = None,
+    dataset_path: str = settings.raw_csv_path,
+    broker: str = settings.kafka_broker,
+    topic: str = settings.kafka_topic,
+    limit: int | None = None,
     delay: float = 0.01,
     corrupt_rate: float = 0.0,
     synthetic: bool = True
-):
+) -> None:
     if not os.path.exists(dataset_path):
         logger.error(f"Dataset file not found at: {dataset_path}")
         sys.exit(1)
@@ -308,11 +306,12 @@ def stream_transactions(
     elapsed = time.time() - start_time
     logger.info(f"Completed streaming {total_sent} events ({corrupt_sent} corrupt) in {elapsed:.2f} seconds.")
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stream Transaction Events into Redpanda")
-    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET_PATH, help="Path to dataset CSV")
-    parser.add_argument("--broker", type=str, default=KAFKA_BROKER, help="Stream broker address")
-    parser.add_argument("--topic", type=str, default=KAFKA_TOPIC, help="Topic name")
+    parser.add_argument("--dataset", type=str, default=settings.raw_csv_path, help="Path to dataset CSV")
+    parser.add_argument("--broker", type=str, default=settings.kafka_broker, help="Stream broker address")
+    parser.add_argument("--topic", type=str, default=settings.kafka_topic, help="Topic name")
     parser.add_argument("--limit", type=int, default=0, help="Max records to send (0 or negative for unlimited continuous generation)")
     parser.add_argument("--delay", type=float, default=0.005, help="Delay between events in seconds")
     parser.add_argument("--corrupt-rate", type=float, default=0.0, help="Ratio of corrupt test events (0.0 to 1.0)")
@@ -328,4 +327,3 @@ if __name__ == "__main__":
         corrupt_rate=args.corrupt_rate,
         synthetic=not args.no_synthetic
     )
-
