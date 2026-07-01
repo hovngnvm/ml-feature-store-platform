@@ -1,8 +1,14 @@
+"""
+Prefect 3 Pipeline Orchestration & Continuous Training Flow.
+
+Orchestrates 6-step end-to-end pipeline: Batch execution, Stream DLQ audit,
+Feast materialization, Audit verification, Evidently drift analysis, and Hybrid CT retraining.
+"""
+
 import os
 import sys
 import time
 import argparse
-import logging
 from datetime import datetime, timezone
 import pandas as pd
 import redis
@@ -10,37 +16,28 @@ from dotenv import load_dotenv
 
 from prefect import task, flow
 
+from src.config.settings import settings
+from src.utils.logger import get_logger
+
 load_dotenv()
+logger = get_logger("orchestration_execute")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger("orchestration_execute")
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(os.path.join(PROJECT_DIR, "src"))
-
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-
-# -----------------------------------------------------------------------------
-# 1. Prefect Task Definitions
-# -----------------------------------------------------------------------------
 @task(name="Batch Lakehouse & DQ Gate Engine", retries=2, retry_delay_seconds=5)
-def task_batch_lakehouse():
+def task_batch_lakehouse() -> dict:
     """Step 1: Executes DuckDB Batch Feature Pipeline & Pandera DQ Assertions Gate."""
-    logger.info("--- [STEP 1/4] Running Batch Feature Job & Data Quality Gate (Pandera) ---")
-    from offline.batch_feature_job import run_batch_feature_pipeline
+    logger.info("[STEP 1/6] Running Batch Feature Job & Data Quality Gate (Pandera)")
+    from src.offline.batch_feature_job import run_batch_feature_pipeline
     partition_file = run_batch_feature_pipeline()
-    logger.info(f"✅ Step 1 PASSED: Generated Partitioned Parquet Lakehouse at '{partition_file}'")
+    logger.info(f"Step 1 PASSED: Generated Partitioned Parquet Lakehouse at '{partition_file}'")
     return {"status": "SUCCESS", "partition_file": partition_file}
 
+
 @task(name="Stream Engine & DLQ Isolation")
-def task_stream_dlq():
+def task_stream_dlq() -> dict:
     """Step 2: Simulates PyFlink Stream Processing & DLQ Side Output Isolation."""
-    logger.info("--- [STEP 2/4] Executing Stream Feature Engine & DLQ Isolation ---")
-    from streaming.flink_feature_job import DualPathRedisFeatureSink
+    logger.info("[STEP 2/6] Executing Stream Feature Engine & DLQ Isolation")
+    from src.streaming.flink_feature_job import DualPathRedisFeatureSink
     sink = DualPathRedisFeatureSink()
 
     test_stream_events = [
@@ -63,31 +60,32 @@ def task_stream_dlq():
             corrupt_count += 1
 
     sink.flush_cold_path_archive()
-    logger.info(f"✅ Step 2 PASSED: Processed {valid_count} valid events, isolated {corrupt_count} corrupt events into DLQ Parquet.")
+    logger.info(f"Step 2 PASSED: Processed {valid_count} valid events, isolated {corrupt_count} corrupt events into DLQ Parquet.")
     return {"status": "SUCCESS", "valid_count": valid_count, "corrupt_count": corrupt_count}
 
+
 @task(name="Feast Materialization Sync")
-def task_feast_materialize():
+def task_feast_materialize() -> dict:
     """Step 3: Materializes latest batch features from Parquet into Redis Online Store via Feast SDK."""
-    logger.info("--- [STEP 3/4] Triggering Feast Materialization into Redis ---")
-    feature_repo_dir = os.path.join(PROJECT_DIR, "feature_repository")
+    logger.info("[STEP 3/6] Triggering Feast Materialization into Redis")
     from feast import FeatureStore
-    store = FeatureStore(repo_path=feature_repo_dir)
+    store = FeatureStore(repo_path=settings.feature_repo_dir)
     start_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
     end_date = datetime.now(timezone.utc)
     store.materialize(start_date=start_date, end_date=end_date, feature_views=["card_batch_features"])
-    logger.info("✅ Step 3 PASSED: Feast Materialization synchronized successfully.")
+    logger.info("Step 3 PASSED: Feast Materialization synchronized successfully.")
     return {"status": "SUCCESS"}
 
+
 @task(name="End-to-End Audit Verification")
-def task_verification_audit():
+def task_verification_audit() -> dict:
     """Step 4: Audit checks Redis Online Store, Lakehouse Hive partitions & DLQ Quarantine files."""
-    logger.info("--- [STEP 4/5] Verifying Redis Keys, Lakehouse Partitioning & DLQ Isolation ---")
+    logger.info("[STEP 4/6] Verifying Redis Keys, Lakehouse Partitioning & DLQ Isolation")
     verification_results = {}
     
     # Audit 1: Redis Key Verification
     try:
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r = redis.Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=True)
         sample_card_features = r.hgetall("card:11556:stream_features")
         if sample_card_features:
             logger.info(f"  [Audit 1 - Redis Online Store] Verified card:11556:stream_features -> {sample_card_features}")
@@ -99,10 +97,9 @@ def task_verification_audit():
         verification_results["redis_online_store"] = f"NOTICE ({e})"
 
     # Audit 2: Lakehouse Hive Partition Verification
-    lakehouse_dir = os.path.join(PROJECT_DIR, "data", "lakehouse", "batch_features")
     partition_found = False
-    if os.path.exists(lakehouse_dir):
-        for root, _, files in os.walk(lakehouse_dir):
+    if os.path.exists(settings.lakehouse_base_dir):
+        for root, _, files in os.walk(settings.lakehouse_base_dir):
             for file in files:
                 if file.endswith(".parquet"):
                     partition_found = True
@@ -111,26 +108,25 @@ def task_verification_audit():
     verification_results["lakehouse_hive_partition"] = "PASSED" if partition_found else "FAILED"
 
     # Audit 3: DLQ Quarantined File Verification
-    dlq_stream_path = os.path.join(PROJECT_DIR, "data", "lakehouse", "dlq", "stream_errors.parquet")
-    if os.path.exists(dlq_stream_path):
-        df_dlq = pd.read_parquet(dlq_stream_path)
-        logger.info(f"  [Audit 3 - DLQ Isolation Store] Verified {len(df_dlq)} corrupt events quarantined in '{dlq_stream_path}'")
+    if os.path.exists(settings.stream_dlq_parquet_path):
+        df_dlq = pd.read_parquet(settings.stream_dlq_parquet_path)
+        logger.info(f"  [Audit 3 - DLQ Isolation Store] Verified {len(df_dlq)} corrupt events quarantined in '{settings.stream_dlq_parquet_path}'")
         verification_results["dlq_quarantine_store"] = f"PASSED ({len(df_dlq)} isolated records)"
     else:
         verification_results["dlq_quarantine_store"] = "READY"
 
     return verification_results
 
+
 @task(name="Feature Monitoring & Data Drift (Evidently AI)")
-def task_feature_monitoring():
+def task_feature_monitoring() -> dict:
     """Step 5: Runs Data Drift Detection using Evidently AI and generates HTML Dashboard report."""
-    logger.info("--- [STEP 5/5] Running Evidently AI Feature Monitoring & Data Drift Analysis ---")
+    logger.info("[STEP 5/6] Running Evidently AI Feature Monitoring & Data Drift Analysis")
     try:
-        from quality.feature_monitoring import generate_feature_drift_report
-        lakehouse_dir = os.path.join(PROJECT_DIR, "data", "lakehouse", "batch_features")
+        from src.quality.feature_monitoring import generate_feature_drift_report
         parquet_files = []
-        if os.path.exists(lakehouse_dir):
-            for root, _, files in os.walk(lakehouse_dir):
+        if os.path.exists(settings.lakehouse_base_dir):
+            for root, _, files in os.walk(settings.lakehouse_base_dir):
                 for file in files:
                     if file.endswith(".parquet"):
                         parquet_files.append(os.path.join(root, file))
@@ -145,15 +141,28 @@ def task_feature_monitoring():
         logger.warning(f"Could not run Evidently AI Feature Monitoring: {e}")
         return {"status": "SKIPPED", "error": str(e)}
 
-# -----------------------------------------------------------------------------
-# 2. Prefect Flow Definition
-# -----------------------------------------------------------------------------
+
+@task(name="Model Ensemble Training & Evaluation (Hybrid CT)")
+def task_model_training(trigger_reason: str = "SCHEDULED_WEEKLY_CRON") -> dict:
+    """Step 6: Trains or Retrains Model Ensemble (XGBoost + LightGBM Blending)."""
+    logger.info(f"[STEP 6/6] Executing Model Ensemble Training (CT Trigger Reason: '{trigger_reason}')")
+    try:
+        from src.ml.train import train_ensemble_pipeline
+        report = train_ensemble_pipeline()
+        logger.info(f"Step 6 PASSED: Model Ensemble Trained via '{trigger_reason}' (PR-AUC: {report['metrics']['ensemble']['pr_auc']}, ROC-AUC: {report['metrics']['ensemble']['roc_auc']})")
+        return {"status": "SUCCESS", "report": report, "trigger_reason": trigger_reason}
+    except Exception as e:
+        logger.warning(f"Could not execute Model Ensemble Training: {e}")
+        return {"status": "FAILED", "error": str(e)}
+
+
 @flow(name="Realtime Feature Store Pipeline", log_prints=True)
-def realtime_feature_store_flow():
-    """Prefect Flow orchestrating the entire DE Hardening Pipeline."""
-    logger.info("================================================================================")
-    logger.info("🚀 STARTING PREFECT REALTIME FEATURE STORE PIPELINE ORCHESTRATION")
-    logger.info("================================================================================")
+def realtime_feature_store_flow(
+    force_retrain: bool = False,
+    scheduled_run: bool = False
+) -> dict:
+    """Prefect Flow orchestrating DE Hardening & Hybrid CT (Time-based Cron + Data Drift Event-Driven)."""
+    logger.info("STARTING PREFECT REALTIME FEATURE STORE & HYBRID CT PIPELINE")
 
     start_time = time.time()
     pipeline_report = {}
@@ -170,29 +179,61 @@ def realtime_feature_store_flow():
     res_step4 = task_verification_audit()
     pipeline_report["step4_verification_audit"] = res_step4
 
+    # Step 5: Data Drift Feature Monitoring
     res_step5 = task_feature_monitoring()
-    pipeline_report["step5_evidently_drift_monitoring"] = res_step5.get("status", "SUCCESS")
+    drift_detected = res_step5.get("dataset_drift", False) if isinstance(res_step5, dict) else False
+    pipeline_report["step5_evidently_drift_monitoring"] = res_step5.get("status", "SUCCESS") if isinstance(res_step5, dict) else "SUCCESS"
+    pipeline_report["dataset_drift_detected"] = drift_detected
+
+    # Continuous Training (CT) decision logic
+    should_retrain = False
+    trigger_reason = "SKIPPED"
+
+    if scheduled_run or force_retrain:
+        should_retrain = True
+        trigger_reason = "SCHEDULED_TIME_BASED_CRON"
+    elif drift_detected:
+        should_retrain = True
+        trigger_reason = "EVENT_DRIVEN_DATA_DRIFT_DETECTED"
+    else:
+        # Default fallback for demo completeness: Execute training to verify full stack
+        should_retrain = True
+        trigger_reason = "BASELINE_PIPELINE_VERIFICATION"
+
+    if should_retrain:
+        logger.info(f"[HYBRID CT DECISION: RETRAIN REQUIRED] Reason: '{trigger_reason}'")
+        res_step6 = task_model_training(trigger_reason=trigger_reason)
+        pipeline_report["step6_model_ensemble_training"] = res_step6.get("status", "SUCCESS")
+        pipeline_report["ct_trigger_reason"] = trigger_reason
+    else:
+        logger.info("[HYBRID CT DECISION: NO RETRAIN NEEDED] Skipping Model Retraining.")
+        pipeline_report["step6_model_ensemble_training"] = "SKIPPED (No Drift & Not Scheduled)"
+        pipeline_report["ct_trigger_reason"] = "SKIPPED"
 
     elapsed = time.time() - start_time
-    logger.info("================================================================================")
-    logger.info(f"🎉 PREFECT PIPELINE COMPLETED IN {elapsed:.2f} SECONDS")
-    logger.info("================================================================================")
+    logger.info(f"PREFECT HYBRID CT PIPELINE COMPLETED IN {elapsed:.2f} SECONDS")
     for k, v in pipeline_report.items():
         logger.info(f"  • {k}: {v}")
 
     return pipeline_report
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prefect Realtime Feature Store Orchestrator")
     parser.add_argument("--serve", action="store_true", help="Serve flow with Prefect Deployment daemon")
-    parser.add_argument("--cron", type=str, default="0 0 * * *", help="Cron schedule for Prefect deployment")
+    parser.add_argument("--cron", type=str, default="0 0 * * 0", help="Cron schedule for Prefect deployment (Default: Weekly on Sunday 00:00)")
+    parser.add_argument("--force-retrain", action="store_true", help="Force time-based CT model retraining regardless of data drift")
+    parser.add_argument("--scheduled-run", action="store_true", help="Mark run as scheduled time-based cron CT run")
     args = parser.parse_args()
 
     if args.serve:
-        logger.info(f"Serving Prefect Flow deployment with Cron schedule '{args.cron}'...")
+        logger.info(f"Serving Prefect Hybrid CT Flow deployment with Weekly Cron schedule '{args.cron}'...")
         realtime_feature_store_flow.serve(
-            name="daily-feature-store-pipeline",
+            name="weekly-hybrid-ct-feature-store-pipeline",
             cron=args.cron
         )
     else:
-        realtime_feature_store_flow()
+        realtime_feature_store_flow(
+            force_retrain=args.force_retrain,
+            scheduled_run=args.scheduled_run
+        )

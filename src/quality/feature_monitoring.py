@@ -1,11 +1,14 @@
+"""
+Evidently AI Feature Data Drift Monitoring Engine.
+
+Compares statistical distribution of current inference/batch features against historical baseline,
+detecting drift and exporting interactive HTML reports.
+"""
+
 import os
-import sys
-import logging
 import pandas as pd
-from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-# Evidently 0.7+ legacy module provides high-level HTML report generator
 try:
     from evidently.legacy.report import Report
     from evidently.legacy.metric_preset import DataDriftPreset
@@ -13,17 +16,14 @@ except ImportError:
     from evidently.report import Report
     from evidently.metric_preset import DataDriftPreset
 
+from src.config.settings import settings
+from src.utils.logger import get_logger
+
 load_dotenv()
+logger = get_logger("feature_monitoring")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger("feature_monitoring")
+DEFAULT_REPORT_PATH = os.path.join(settings.dashboard_dir, "feature_drift_report.html")
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DASHBOARD_DIR = os.path.join(PROJECT_DIR, "dashboards")
-DEFAULT_REPORT_PATH = os.path.join(DASHBOARD_DIR, "feature_drift_report.html")
 
 def generate_feature_drift_report(
     reference_df: pd.DataFrame,
@@ -43,7 +43,6 @@ def generate_feature_drift_report(
     os.makedirs(os.path.dirname(report_html_path), exist_ok=True)
     logger.info(f"[Evidently AI] Running Feature Data Drift Analysis on {len(reference_df):,} reference rows vs {len(current_df):,} current rows...")
 
-    # Filter numeric feature columns
     feature_cols = [
         col for col in current_df.columns
         if col not in ["card_id", "event_timestamp", "timestamp"] and pd.api.types.is_numeric_dtype(current_df[col])
@@ -60,11 +59,9 @@ def generate_feature_drift_report(
         report = Report(metrics=[DataDriftPreset()])
         report.run(reference_data=ref_features, current_data=curr_features)
         
-        # Save HTML Report for browser visualization
         report.save_html(report_html_path)
-        logger.info(f"✅ [Evidently AI] Saved HTML Data Drift Report to '{report_html_path}'")
+        logger.info(f"[Evidently AI] Saved HTML Data Drift Report to '{report_html_path}'")
 
-        # Extract summary dict
         report_dict = report.as_dict()
         drift_metrics = report_dict.get("metrics", [{}])[0].get("result", {})
         
@@ -73,9 +70,9 @@ def generate_feature_drift_report(
         number_of_drifted_features = drift_metrics.get("number_of_drifted_columns", 0)
 
         if dataset_drift:
-            logger.warning(f"⚠️ [Data Drift Alert] Dataset drift DETECTED! ({number_of_drifted_features} features drifted, share: {drift_share:.2%})")
+            logger.warning(f"[Data Drift Alert] Dataset drift DETECTED! ({number_of_drifted_features} features drifted, share: {drift_share:.2%})")
         else:
-            logger.info(f"✅ [Data Drift Normal] No dataset drift detected. (Drift share: {drift_share:.2%})")
+            logger.info(f"[Data Drift Normal] No dataset drift detected. (Drift share: {drift_share:.2%})")
 
         return {
             "status": "SUCCESS",
@@ -88,11 +85,11 @@ def generate_feature_drift_report(
         logger.error(f"Failed to generate Evidently AI drift report: {e}")
         return {"status": "FAILED", "error": str(e)}
 
+
 if __name__ == "__main__":
     logger.info("Running Evidently AI Feature Monitoring Self-Test...")
     import numpy as np
 
-    # Synthetic baseline data (Reference)
     np.random.seed(42)
     ref_sample = pd.DataFrame({
         "trans_count_7d": np.random.poisson(lam=5, size=100),
@@ -101,12 +98,11 @@ if __name__ == "__main__":
         "max_amount_30d": np.random.normal(loc=500.0, scale=100.0, size=100),
     })
 
-    # Synthetic drifted data (Current)
     curr_sample = pd.DataFrame({
         "trans_count_7d": np.random.poisson(lam=5, size=100),
         "trans_count_30d": np.random.poisson(lam=20, size=100),
-        "avg_amount_30d": np.random.normal(loc=450.0, scale=80.0, size=100), # Drifted!
-        "max_amount_30d": np.random.normal(loc=1500.0, scale=300.0, size=100), # Drifted!
+        "avg_amount_30d": np.random.normal(loc=450.0, scale=80.0, size=100),
+        "max_amount_30d": np.random.normal(loc=1500.0, scale=300.0, size=100),
     })
 
     res = generate_feature_drift_report(ref_sample, curr_sample)
