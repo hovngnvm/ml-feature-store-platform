@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-09T06:11:43.273355+00:00",
+  "timestamp": "2026-08-18T04:15:08.617573+00:00",
   "dataset_size": 49999,
   "train_size": 39999,
   "val_size": 10000,
@@ -15,8 +15,21 @@
     "amount_ratio_30d",
     "is_amount_gt_30d_max"
   ],
+  "optimal_threshold": 0.37,
+  "threshold_tuning": {
+    "optimal_threshold": 0.37,
+    "min_cost": 10157.89,
+    "cost_at_05": 14496.64,
+    "savings_amount": 4338.75,
+    "savings_pct": 29.93,
+    "f1_optimal_threshold": 0.76,
+    "f2_optimal_threshold": 0.64,
+    "best_f1_score": 0.3275,
+    "best_f2_score": 0.4182
+  },
   "metrics": {
     "xgboost": {
+      "threshold": 0.5,
       "pr_auc": 0.2328,
       "roc_auc": 0.8522,
       "f1_score": 0.2144,
@@ -32,6 +45,7 @@
       ]
     },
     "lightgbm": {
+      "threshold": 0.5,
       "pr_auc": 0.219,
       "roc_auc": 0.8539,
       "f1_score": 0.208,
@@ -46,7 +60,8 @@
         ]
       ]
     },
-    "ensemble": {
+    "ensemble_default_05": {
+      "threshold": 0.5,
       "pr_auc": 0.2279,
       "roc_auc": 0.8558,
       "f1_score": 0.2152,
@@ -58,6 +73,38 @@
         [
           76,
           195
+        ]
+      ]
+    },
+    "ensemble_optimal": {
+      "threshold": 0.37,
+      "pr_auc": 0.2279,
+      "roc_auc": 0.8558,
+      "f1_score": 0.1447,
+      "confusion_matrix": [
+        [
+          7193,
+          2536
+        ],
+        [
+          52,
+          219
+        ]
+      ]
+    },
+    "ensemble": {
+      "threshold": 0.37,
+      "pr_auc": 0.2279,
+      "roc_auc": 0.8558,
+      "f1_score": 0.1447,
+      "confusion_matrix": [
+        [
+          7193,
+          2536
+        ],
+        [
+          52,
+          219
         ]
       ]
     }
