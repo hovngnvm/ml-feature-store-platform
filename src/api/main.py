@@ -1,107 +1,98 @@
 """
-Real-Time Fraud Detection Model Serving REST API.
+Real-Time Fraud Detection Model Serving REST API with Dynamic Threshold Serving.
 
-Low-latency REST API (< 5ms SLA) retrieving online features from Redis/Feast 
-and predicting transaction fraud scores via Model Ensemble (XGBoost + LightGBM).
+Provides sub-5ms low-latency inference endpoint retrieving online features from Redis/Feast,
+scoring transactions via Model Ensemble (XGBoost + LightGBM), and evaluating risk
+against the dynamically tuned cost-optimal decision threshold.
 """
 
 import os
+import sys
 import time
-from typing import Dict, Any, Optional
-from contextlib import asynccontextmanager
-
 import joblib
+import redis
 import numpy as np
 import pandas as pd
+from typing import Dict
+from dotenv import load_dotenv
+
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
 from src.config.settings import settings
 from src.utils.logger import get_logger
-from src.utils.redis_client import RedisClient
-from src.ml.ensemble import FraudModelEnsemble
+from src.ml.train import FraudModelEnsemble
 
+sys.modules['__main__'].FraudModelEnsemble = FraudModelEnsemble
+
+load_dotenv()
 logger = get_logger("fraud_serving_api")
-
-MODEL_PATH = os.path.join(settings.project_dir, "models", "ensemble_fraud_model.joblib")
-REPO_PATH = os.path.join(settings.project_dir, "feature_repository")
-
-# Global variables for cached model & feature store
-ensemble_model: Optional[FraudModelEnsemble] = None
-feast_store: Optional[Any] = None
-redis_wrapper: Optional[RedisClient] = None
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan context manager for loading serving artifacts on startup and cleaning up on shutdown."""
-    global ensemble_model, feast_store, redis_wrapper
-    logger.info("Initializing Model Serving API Resources...")
-
-    # 1. Load Ensemble Model
-    if os.path.exists(MODEL_PATH):
-        try:
-            ensemble_model = joblib.load(MODEL_PATH)
-            logger.info(f"Ensemble Model successfully loaded from '{MODEL_PATH}'")
-        except Exception as e:
-            logger.error(f"Failed to load Ensemble Model artifact: {e}")
-    else:
-        logger.warning(f"Ensemble Model artifact not found at '{MODEL_PATH}'. Run src/ml/train.py first.")
-
-    # 2. Load Feast Store
-    if os.path.exists(REPO_PATH):
-        try:
-            from feast import FeatureStore
-            feast_store = FeatureStore(repo_path=REPO_PATH)
-            logger.info(f"Feast FeatureStore initialized from '{REPO_PATH}'")
-        except Exception as e:
-            logger.warning(f"Could not load Feast FeatureStore: {e}")
-
-    # 3. Load Direct Redis Client
-    try:
-        redis_wrapper = RedisClient()
-        if redis_wrapper.ping():
-            logger.info(f"Redis direct connection established to {settings.redis_host}:{settings.redis_port}")
-    except Exception as e:
-        logger.warning(f"Redis direct connection notice: {e}")
-
-    yield
-
-    # Cleanup resources on shutdown
-    if redis_wrapper:
-        redis_wrapper.close()
-    logger.info("Serving API resources released.")
-
 
 app = FastAPI(
     title="Real-Time Fraud Detection Model Serving API",
-    description="Low-latency REST API retrieving online features from Redis/Feast and predicting transaction fraud scores via Model Ensemble.",
-    version="1.0.0",
-    lifespan=lifespan
+    description="Low-latency REST API (< 5ms SLA) retrieving online features from Redis/Feast and predicting transaction fraud scores via Model Ensemble with Dynamic Threshold Tuning.",
+    version="1.0.0"
 )
+
+ensemble_model = None
+feast_store = None
+redis_client = None
 
 
 class TransactionRequest(BaseModel):
-    """Schema for incoming online transaction inference request."""
-    card_id: str = Field(..., json_schema_extra={"example": "11556"}, description="Unique credit card identifier")
-    current_amount: float = Field(..., json_schema_extra={"example": 250.0}, gt=0, description="Current transaction amount in USD")
+    card_id: str = Field(..., example="11556", description="Unique credit card identifier")
+    current_amount: float = Field(..., example=250.0, gt=0, description="Current transaction amount in USD")
 
 
 class PredictionResponse(BaseModel):
-    """Schema for fraud score prediction response."""
     card_id: str
     is_fraud: int
     fraud_score: float
     decision: str
+    decision_threshold: float
     xgb_score: float
     lgb_score: float
     latency_ms: float
     features_used: Dict[str, float]
 
 
+@app.on_event("startup")
+def load_serving_resources() -> None:
+    """Loads Ensemble Model Artifact, Feast Registry & Redis Client on API startup."""
+    global ensemble_model, feast_store, redis_client
+    logger.info("Initializing Model Serving API Resources...")
+
+    # Load Ensemble Model
+    if os.path.exists(settings.model_artifact_path):
+        try:
+            ensemble_model = joblib.load(settings.model_artifact_path)
+            th = getattr(ensemble_model, "optimal_threshold", 0.5)
+            logger.info(f"Ensemble Model loaded from '{settings.model_artifact_path}' (Optimal Decision Threshold: {th:.4f})")
+        except Exception as e:
+            logger.error(f"Failed to load Ensemble Model artifact: {e}")
+    else:
+        logger.warning(f"Ensemble Model artifact not found at '{settings.model_artifact_path}'. Run src/ml/train.py first.")
+
+    # Load Feast Store
+    if os.path.exists(settings.feature_repo_dir):
+        try:
+            from feast import FeatureStore
+            feast_store = FeatureStore(repo_path=settings.feature_repo_dir)
+            logger.info(f"Feast FeatureStore initialized from '{settings.feature_repo_dir}'")
+        except Exception as e:
+            logger.warning(f"Could not load Feast FeatureStore: {e}")
+
+    # Load Direct Redis Client
+    try:
+        redis_client = redis.Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=True)
+        redis_client.ping()
+        logger.info(f"Redis direct connection established to {settings.redis_host}:{settings.redis_port}")
+    except Exception as e:
+        logger.warning(f"Redis direct connection notice: {e}")
+
+
 @app.get("/", tags=["Health"])
-def root() -> Dict[str, str]:
-    """Root health check endpoint."""
+def root() -> dict[str, str]:
     return {
         "status": "ONLINE",
         "service": "Real-Time Fraud Detection Model Serving API",
@@ -111,25 +102,35 @@ def root() -> Dict[str, str]:
 
 
 @app.get("/health", tags=["Health"])
-def health_check() -> Dict[str, Any]:
+def health_check():
     """Healthcheck endpoint verifying model & infrastructure readiness."""
     model_loaded = ensemble_model is not None
-    redis_ok = redis_wrapper.ping() if redis_wrapper else False
+    redis_ok = False
+    if redis_client:
+        try:
+            redis_ok = redis_client.ping()
+        except Exception:
+            redis_ok = False
+
+    decision_th = getattr(ensemble_model, "optimal_threshold", 0.5) if ensemble_model else None
 
     return {
         "status": "HEALTHY" if model_loaded else "DEGRADED",
         "model_loaded": model_loaded,
+        "optimal_decision_threshold": decision_th,
         "redis_connected": redis_ok,
         "feast_ready": feast_store is not None
     }
 
 
 @app.post("/predict", response_model=PredictionResponse, tags=["Prediction"])
-def predict_fraud(req: TransactionRequest) -> PredictionResponse:
-    """Inference Endpoint:
+def predict_fraud(req: TransactionRequest):
+    """
+    Sub-5ms Inference Endpoint with Dynamic Decision Threshold:
     1. Fetches online features from Redis/Feast.
-    2. Calculates On-Demand derived features.
+    2. Calculates On-Demand features.
     3. Executes Model Ensemble inference (XGBoost + LightGBM).
+    4. Evaluates decision using dynamically tuned optimal threshold.
     """
     start_time = time.perf_counter()
 
@@ -142,7 +143,8 @@ def predict_fraud(req: TransactionRequest) -> PredictionResponse:
     card_id = str(req.card_id)
     curr_amount = float(req.current_amount)
 
-    online_features: Dict[str, float] = {
+    # Retrieve Online Features
+    online_features = {
         "trans_count_7d": 1.0,
         "trans_count_30d": 5.0,
         "avg_amount_30d": 150.0,
@@ -152,6 +154,7 @@ def predict_fraud(req: TransactionRequest) -> PredictionResponse:
         "TransactionAmt": curr_amount
     }
 
+    # Try Feast online lookup
     if feast_store:
         try:
             res_dict = feast_store.get_online_features(
@@ -173,6 +176,7 @@ def predict_fraud(req: TransactionRequest) -> PredictionResponse:
         except Exception as e:
             logger.debug(f"Feast online lookup notice for card '{card_id}': {e}")
 
+    # Compute Derived Features
     avg_30d = online_features.get("avg_amount_30d", 150.0)
     max_30d = online_features.get("max_amount_30d", 500.0)
 
@@ -182,25 +186,26 @@ def predict_fraud(req: TransactionRequest) -> PredictionResponse:
     feature_cols = ensemble_model.feature_names
     input_df = pd.DataFrame([online_features])[feature_cols].fillna(0.0)
 
+    # Run Model Ensemble Inference
     xgb_score = float(ensemble_model.xgb_model.predict_proba(input_df)[0, 1])
     lgb_score = float(ensemble_model.lgb_model.predict_proba(input_df)[0, 1])
     fraud_score = float(ensemble_model.predict_proba(input_df)[0, 1])
 
-    is_fraud = 1 if fraud_score >= 0.5 else 0
+    # Evaluate against Dynamic Optimal Decision Threshold
+    decision_th = float(getattr(ensemble_model, "optimal_threshold", 0.5))
+    is_fraud = 1 if fraud_score >= decision_th else 0
     decision = "ALERT: FRAUD DETECTED" if is_fraud == 1 else "APPROVED"
 
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
-    logger.info(
-        f"Predict Card '{card_id}' (${curr_amount:.2f}) -> {decision} "
-        f"(Score: {fraud_score:.4f}, Latency: {elapsed_ms:.2f}ms)"
-    )
+    logger.info(f"Predict Card '{card_id}' (${curr_amount:.2f}) -> {decision} (Score: {fraud_score:.4f}, Threshold: {decision_th:.4f}, Latency: {elapsed_ms:.2f}ms)")
 
     return PredictionResponse(
         card_id=card_id,
         is_fraud=is_fraud,
         fraud_score=round(fraud_score, 4),
         decision=decision,
+        decision_threshold=round(decision_th, 4),
         xgb_score=round(xgb_score, 4),
         lgb_score=round(lgb_score, 4),
         latency_ms=round(elapsed_ms, 2),
@@ -210,4 +215,4 @@ def predict_fraud(req: TransactionRequest) -> PredictionResponse:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.api.main:app", host="0.0.0.0", port=settings.fastapi_port, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

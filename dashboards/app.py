@@ -25,12 +25,16 @@ st.set_page_config(
 )
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_PATH = os.path.join(PROJECT_DIR, "models", "ensemble_fraud_model.joblib")
-REPORT_JSON_PATH = os.path.join(PROJECT_DIR, "models", "evaluation_report.json")
-DRIFT_HTML_PATH = os.path.join(PROJECT_DIR, "dashboards", "feature_drift_report.html")
+if PROJECT_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_DIR)
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+from src.config.settings import settings
+
+MODEL_PATH = settings.model_artifact_path
+REPORT_JSON_PATH = settings.report_json_path
+DRIFT_HTML_PATH = os.path.join(settings.dashboard_dir, "feature_drift_report.html")
+REDIS_HOST = settings.redis_host
+REDIS_PORT = settings.redis_port
 
 # Bind FraudModelEnsemble for joblib
 try:
@@ -39,8 +43,10 @@ try:
 except Exception:
     pass
 
+from typing import Any
+
 @st.cache_resource
-def load_ensemble_model():
+def load_ensemble_model() -> Any:
     """Loads and caches trained Model Ensemble pipeline."""
     if os.path.exists(MODEL_PATH):
         try:
@@ -52,7 +58,7 @@ def load_ensemble_model():
     return None
 
 @st.cache_data
-def load_evaluation_report():
+def load_evaluation_report() -> dict | None:
     """Loads model evaluation metrics JSON."""
     if os.path.exists(REPORT_JSON_PATH):
         try:
@@ -63,7 +69,7 @@ def load_evaluation_report():
     return None
 
 @st.cache_data
-def get_card_historical_features(card_id_str: str):
+def get_card_historical_features(card_id_str: str) -> dict[str, float]:
     """Lookup real features from batch_features.parquet or compute card-specific deterministic baseline."""
     parquet_path = os.path.join(PROJECT_DIR, "data", "batch_features.parquet")
     if os.path.exists(parquet_path):
@@ -98,106 +104,103 @@ def get_card_historical_features(card_id_str: str):
 # Custom Glassmorphic Dark Styling
 st.markdown("""
 <style>
-    .main {
-        background-color: #0e1117;
-    }
     .metric-card {
         background: rgba(255, 255, 255, 0.05);
-        border-radius: 12px;
-        padding: 20px;
         border: 1px solid rgba(255, 255, 255, 0.1);
-        backdrop-filter: blur(10px);
-        margin-bottom: 15px;
-    }
-    .status-approved {
-        color: #00e676;
-        font-weight: bold;
-        font-size: 24px;
+        border-radius: 12px;
+        padding: 16px;
+        backdrop-filter: blur(8px);
+        margin-bottom: 12px;
     }
     .status-fraud {
-        color: #ff1744;
+        background: linear-gradient(135deg, rgba(255, 23, 68, 0.2), rgba(213, 0, 0, 0.4));
+        border: 1px solid #ff1744;
+        border-radius: 8px;
+        padding: 12px;
+        color: #ff5252;
         font-weight: bold;
-        font-size: 24px;
+        text-align: center;
+        font-size: 1.2rem;
+    }
+    .status-approved {
+        background: linear-gradient(135deg, rgba(0, 230, 118, 0.2), rgba(0, 200, 83, 0.4));
+        border: 1px solid #00e676;
+        border-radius: 8px;
+        padding: 12px;
+        color: #69f0ae;
+        font-weight: bold;
+        text-align: center;
+        font-size: 1.2rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Main Title & Subtitle
-st.title("🛡️ Real-Time Feature Store & Fraud Detection AI Platform")
-st.caption("Powered by PyFlink, DuckDB, Feast, Redis, XGBoost + LightGBM Model Ensemble & Evidently AI")
+# Application Header
+st.title("💳 Real-Time Fraud Detection & Feature Store AI Platform")
+st.markdown("Enterprise MLOps Platform with Dual-Path Feature Ingestion, Model Ensemble (XGBoost + LightGBM), and Dynamic Decision Threshold Tuning.")
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "⚡ Real-Time Model Serving (< 5ms SLA)",
+    "📊 Model Performance & Cost Optimization",
+    "🏪 Redis Feature Store Inspector",
+    "🛡️ Evidently AI Data Drift Report"
+])
 
 model_pipeline = load_ensemble_model()
 eval_report = load_evaluation_report()
 
-# Create App Tabs
-tab1, tab2, tab3, tab4 = st.tabs([
-    "💳 Real-Time Fraud Simulator & SHAP",
-    "📊 Model Performance & Ensemble Benchmark",
-    "🏪 Redis Feature Store Inspector",
-    "🛡️ Evidently AI Data Drift"
-])
-
-# =============================================================================
-# TAB 1: Real-Time Fraud Simulator & SHAP Explainability
-# =============================================================================
+# Tab 1: Real-Time Model Serving Simulator
 with tab1:
-    st.subheader("💳 Real-Time Transaction Fraud Prediction Simulator")
-    st.write("Simulate a credit card transaction and observe real-time fraud probability scores & SHAP feature attributions.")
+    st.subheader("⚡ Low-Latency Fraud Prediction & Dynamic Threshold Inference")
+    st.write("Simulate real-time transactions by querying online features from Redis/Feast and evaluating risk against the Cost-Optimal Decision Threshold.")
 
     col_input, col_result = st.columns([1, 1])
 
     with col_input:
-        st.markdown("### 📝 Transaction Payload Input")
-        card_id = st.text_input("Card ID", value="11556", help="Card identifier")
-        curr_amount = st.number_input("Transaction Amount ($)", min_value=1.0, max_value=50000.0, value=250.0, step=10.0)
+        st.markdown("### 📝 Transaction Simulation Parameters")
+        card_id = st.text_input("Credit Card ID (card1)", value="11556")
+        amount = st.number_input("Transaction Amount ($ USD)", min_value=1.0, max_value=50000.0, value=250.0, step=10.0)
+        
+        card_features = get_card_historical_features(card_id)
+        
+        with st.expander("🔍 Online Historical Features (from Feast/Redis)", expanded=True):
+            st.json(card_features)
 
-        st.markdown("#### ⚡ Preset Test Scenarios")
-        c_p1, c_p2, c_p3 = st.columns(3)
-        if c_p1.button("🟢 Normal ($45)"):
-            curr_amount = 45.0
-        if c_p2.button("🟡 Medium ($350)"):
-            curr_amount = 350.0
-        if c_p3.button("🔴 High Risk ($2,800)"):
-            curr_amount = 2800.0
-
-        btn_predict = st.button("🚀 Predict Fraud Score", type="primary", use_container_width=True)
+        btn_predict = st.button("🚀 Score Transaction (Inference SLA < 5ms)", type="primary", use_container_width=True)
 
     with col_result:
-        st.markdown("### 📊 Prediction & Risk Assessment")
-        if btn_predict or curr_amount > 0:
+        st.markdown("### 🎯 Decision & Risk Scoring Result")
+        if btn_predict:
             if model_pipeline is None:
-                st.warning("⚠️ Model artifact not loaded. Please run `python src/ml/train.py` first.")
+                st.error("Model is not loaded! Please run `python src/ml/train.py` first.")
             else:
                 start_t = time.perf_counter()
-
-                # Dynamic feature retrieval based on entered Card ID
-                online_features = get_card_historical_features(card_id)
-                online_features["TransactionAmt"] = float(curr_amount)
-
-                # Compute derived features
-                avg_30d = online_features["avg_amount_30d"]
-                max_30d = online_features["max_amount_30d"]
+                
+                curr_amount = float(amount)
+                avg_30d = float(card_features["avg_amount_30d"])
+                max_30d = float(card_features["max_amount_30d"])
+                
+                online_features = dict(card_features)
+                online_features["TransactionAmt"] = curr_amount
                 online_features["amount_ratio_30d"] = curr_amount / (avg_30d + 1.0)
                 online_features["is_amount_gt_30d_max"] = 1.0 if curr_amount > max_30d else 0.0
 
-                # Prepare DataFrame
                 feature_cols = model_pipeline.feature_names
                 input_df = pd.DataFrame([online_features])[feature_cols]
 
-                # Run Inference
                 xgb_p = float(model_pipeline.xgb_model.predict_proba(input_df)[0, 1])
                 lgb_p = float(model_pipeline.lgb_model.predict_proba(input_df)[0, 1])
                 fraud_score = float(model_pipeline.predict_proba(input_df)[0, 1])
                 latency_ms = (time.perf_counter() - start_t) * 1000.0
 
-                is_fraud = fraud_score >= 0.5
+                decision_th = float(getattr(model_pipeline, "optimal_threshold", 0.5))
+                is_fraud = fraud_score >= decision_th
                 decision_str = "🚨 ALERT: FRAUD DETECTED" if is_fraud else "✅ APPROVED (LEGITIMATE)"
                 status_class = "status-fraud" if is_fraud else "status-approved"
 
                 st.markdown(f'<div class="{status_class}">{decision_str}</div>', unsafe_allow_html=True)
-                st.markdown(f"**Fraud Probability Score:** `{fraud_score * 100:.2f}%` | **SLA Latency:** `{latency_ms:.2f} ms`")
+                st.markdown(f"**Fraud Risk Score:** `{fraud_score * 100:.2f}%` | **Cost-Optimal Threshold (θ):** `{decision_th * 100:.2f}%` | **SLA Latency:** `{latency_ms:.2f} ms`")
 
-                # Gauge Meter Plot
                 fig_gauge = go.Figure(go.Indicator(
                     mode="gauge+number",
                     value=fraud_score * 100,
@@ -206,14 +209,13 @@ with tab1:
                         'axis': {'range': [0, 100]},
                         'bar': {'color': "#ff1744" if is_fraud else "#00e676"},
                         'steps': [
-                            {'range': [0, 30], 'color': "rgba(0, 230, 118, 0.2)"},
-                            {'range': [30, 60], 'color': "rgba(255, 235, 59, 0.2)"},
-                            {'range': [60, 100], 'color': "rgba(255, 23, 68, 0.2)"}
+                            {'range': [0, decision_th * 100], 'color': "rgba(0, 230, 118, 0.2)"},
+                            {'range': [decision_th * 100, 100], 'color': "rgba(255, 23, 68, 0.2)"}
                         ],
                         'threshold': {
                             'line': {'color': "red", 'width': 4},
                             'thickness': 0.75,
-                            'value': 50
+                            'value': decision_th * 100
                         }
                     }
                 ))
@@ -240,44 +242,53 @@ with tab1:
         except Exception as e:
             st.info(f"SHAP Waterfall plot feature attribution notice: {e}")
 
-# =============================================================================
-# TAB 2: Model Performance & Ensemble Benchmark
-# =============================================================================
+# Tab 2: Model Performance & Cost Optimization Benchmark
 with tab2:
-    st.subheader("📊 Model Performance & Ensemble Benchmark")
-    st.write("Comparative evaluation metrics (PR-AUC, ROC-AUC, F1-Score) across XGBoost, LightGBM, and Model Ensemble.")
+    st.subheader("📊 Model Performance & Financial Cost Matrix Optimization")
+    st.write("Comparative evaluation metrics and business cost minimization analysis using Dynamic Decision Threshold Tuning.")
 
     if eval_report:
+        th_tuning = eval_report.get("threshold_tuning", {})
+        if th_tuning:
+            st.markdown("### 💰 Financial Cost Matrix Optimization Summary")
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            kpi1.metric("Optimal Threshold (θ*)", f"{th_tuning.get('optimal_threshold', 0.5):.4f}", "Cost-Tuned")
+            kpi2.metric("Min Financial Loss ($)", f"${th_tuning.get('min_cost', 0.0):,.2f}")
+            kpi3.metric("Loss @ Fixed 0.50 ($)", f"${th_tuning.get('cost_at_05', 0.0):,.2f}")
+            kpi4.metric("Financial Savings", f"${th_tuning.get('savings_amount', 0.0):,.2f}", f"-{th_tuning.get('savings_pct', 0.0):.2f}% Loss")
+
+        st.markdown("### 📈 Model Evaluation Metrics Comparison")
         metrics_dict = eval_report.get("metrics", {})
-        
-        # Format comparison table
         rows = []
         for model_name, m_data in metrics_dict.items():
-            rows.append({
-                "Model Architecture": model_name.upper(),
-                "PR-AUC (Precision-Recall AUC)": m_data.get("pr_auc"),
-                "ROC-AUC Score": m_data.get("roc_auc"),
-                "F1-Score": m_data.get("f1_score")
-            })
+            if isinstance(m_data, dict) and "pr_auc" in m_data:
+                rows.append({
+                    "Model Setup": model_name.replace("_", " ").upper(),
+                    "PR-AUC (Precision-Recall AUC)": m_data.get("pr_auc"),
+                    "ROC-AUC Score": m_data.get("roc_auc"),
+                    "F1-Score": m_data.get("f1_score"),
+                    "Decision Threshold": m_data.get("threshold", 0.5)
+                })
         df_metrics = pd.DataFrame(rows)
         st.dataframe(df_metrics, use_container_width=True)
 
-        # Bar chart comparison
-        fig_bar = px.bar(
-            df_metrics,
-            x="Model Architecture",
-            y=["PR-AUC (Precision-Recall AUC)", "ROC-AUC Score"],
-            barmode="group",
-            title="Model Evaluation Metric Comparison",
-            color_discrete_sequence=["#00e676", "#29b6f6"]
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        # Visualizations from models directory
+        cost_plot_path = os.path.join(PROJECT_DIR, "models", "cost_vs_threshold.png")
+        tradeoff_plot_path = os.path.join(PROJECT_DIR, "models", "threshold_tradeoffs.png")
+
+        c1, c2 = st.columns(2)
+        if os.path.exists(cost_plot_path):
+            with c1:
+                st.markdown("#### 📉 Financial Cost Curve vs Threshold")
+                st.image(cost_plot_path, use_container_width=True)
+        if os.path.exists(tradeoff_plot_path):
+            with c2:
+                st.markdown("#### 🎯 Metric Trade-offs vs Threshold")
+                st.image(tradeoff_plot_path, use_container_width=True)
     else:
         st.warning("⚠️ Evaluation report JSON not found at `models/evaluation_report.json`. Run `python src/ml/train.py` to generate.")
 
-# =============================================================================
-# TAB 3: Redis Feature Store Inspector
-# =============================================================================
+# Tab 3: Redis Feature Store Inspector
 with tab3:
     st.subheader("🏪 Redis Online Feature Store Inspector")
     st.write("Inspect low-latency feature vectors stored in Redis Online Store.")
@@ -297,9 +308,7 @@ with tab3:
         except Exception as e:
             st.error(f"Redis Connection Error: {e}")
 
-# =============================================================================
-# TAB 4: Evidently AI Data Drift Report
-# =============================================================================
+# Tab 4: Evidently AI Data Drift Report
 with tab4:
     st.subheader("🛡️ Evidently AI Feature Drift & Quality Report")
     st.write("Embedded interactive Data Drift report generated by Evidently AI engine.")
