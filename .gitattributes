@@ -1,0 +1,5 @@
+# GitHub Linguist Overrides
+# Exclude standalone generated HTML reports and assets from repository language statistics
+dashboards/*.html linguist-vendored
+*.html linguist-generated=true
+*.html linguist-documentation
