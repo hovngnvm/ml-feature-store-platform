@@ -4,15 +4,9 @@ Automated Machine Learning Algorithm Test Suite.
 Verifies Cost Matrix optimization logic, Dynamic Decision Threshold Tuning, and financial fraud savings.
 """
 
-import os
-import sys
 import numpy as np
-
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_DIR not in sys.path:
-    sys.path.insert(0, PROJECT_DIR)
-
-from src.ml.train import find_optimal_decision_threshold, FraudModelEnsemble
+from src.ml.train import find_optimal_decision_threshold
+from src.ml.ensemble import FraudModelEnsemble
 
 
 def test_optimal_threshold_tuning() -> None:

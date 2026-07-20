@@ -4,14 +4,7 @@ Automated Data Quality Gate Test Suite.
 Verifies Pandera schema assertion gate filters valid transactions and quarantines invalid records.
 """
 
-import os
-import sys
 import pandas as pd
-
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_DIR not in sys.path:
-    sys.path.insert(0, PROJECT_DIR)
-
 from src.quality.data_assert import validate_batch_dataframe
 
 
