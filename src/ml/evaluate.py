@@ -23,9 +23,8 @@ from sklearn.metrics import (
 
 from src.config.settings import settings
 from src.utils.logger import get_logger
-from src.ml.train import FraudModelEnsemble
+from src.ml.ensemble import FraudModelEnsemble
 
-sys.modules['__main__'].FraudModelEnsemble = FraudModelEnsemble
 logger = get_logger("ml_evaluate")
 
 
