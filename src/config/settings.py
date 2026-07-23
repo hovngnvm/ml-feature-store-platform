@@ -64,8 +64,9 @@ class SystemSettings:
             PROJECT_DIR / "data",
             PROJECT_DIR / "models",
             PROJECT_DIR / "dashboards",
+            PROJECT_DIR / "logs",
             PROJECT_DIR / "data" / "lakehouse" / "batch_features",
-            PROJECT_DIR / "data" / "lakehouse" / "dlq"
+            PROJECT_DIR / "data" / "lakehouse" / "dlq",
         ):
             path_obj.mkdir(parents=True, exist_ok=True)
 
