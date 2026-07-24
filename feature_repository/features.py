@@ -10,7 +10,16 @@ from feast.on_demand_feature_view import on_demand_feature_view
 from feast.types import Float64, Int64
 import pandas as pd
 
-from entities import card_entity
+try:
+    from entities import card_entity
+except ImportError:
+    from feature_repository.entities import card_entity
+
+BATCH_FEATURE_TTL_DAYS = 365
+STREAM_FEATURE_TTL_DAYS = 7
+RATIO_EPSILON = 1.0
+ZSCORE_EPSILON = 0.01
+HIGH_VELOCITY_THRESHOLD_5M = 3.0
 
 # Batch Feature Store Source & View (Historical 7d/30d/All-time Features)
 batch_file_source = FileSource(
@@ -22,7 +31,7 @@ batch_file_source = FileSource(
 card_batch_feature_view = FeatureView(
     name="card_batch_features",
     entities=[card_entity],
-    ttl=timedelta(days=365),
+    ttl=timedelta(days=BATCH_FEATURE_TTL_DAYS),
     schema=[
         Field(name="trans_count_7d", dtype=Int64),
         Field(name="trans_count_30d", dtype=Int64),
@@ -44,7 +53,7 @@ stream_push_source = PushSource(
 card_stream_feature_view = FeatureView(
     name="card_stream_features",
     entities=[card_entity],
-    ttl=timedelta(days=7),
+    ttl=timedelta(days=STREAM_FEATURE_TTL_DAYS),
     schema=[
         Field(name="trans_count_1m", dtype=Int64),
         Field(name="trans_count_5m", dtype=Int64),
@@ -85,10 +94,7 @@ transaction_request_source = RequestSource(
     ]
 )
 def card_on_demand_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Computes real-time on-demand derived fraud risk indicators by joining
-    incoming transaction request payload with stream and batch feature vectors.
-    """
+    """Computes real-time on-demand derived fraud risk indicators."""
     out = pd.DataFrame()
     curr_amt = df["current_amount"]
     avg_24h = df["avg_amount_24h"].fillna(0.0)
@@ -97,9 +103,9 @@ def card_on_demand_features(df: pd.DataFrame) -> pd.DataFrame:
     max_30d = df["max_amount_30d"].fillna(0.0)
     count_5m = df["trans_count_5m"].fillna(0)
 
-    out["amount_ratio_24h"] = curr_amt / (avg_24h + 1.0)
-    out["amount_ratio_30d"] = curr_amt / (avg_30d + 1.0)
-    out["amount_zscore_24h"] = (curr_amt - avg_24h) / (stddev_24h + 0.01)
+    out["amount_ratio_24h"] = curr_amt / (avg_24h + RATIO_EPSILON)
+    out["amount_ratio_30d"] = curr_amt / (avg_30d + RATIO_EPSILON)
+    out["amount_zscore_24h"] = (curr_amt - avg_24h) / (stddev_24h + ZSCORE_EPSILON)
     out["is_amount_gt_30d_max"] = (curr_amt > max_30d).astype(float)
-    out["is_high_velocity_5m"] = (count_5m >= 3).astype(float)
+    out["is_high_velocity_5m"] = (count_5m >= HIGH_VELOCITY_THRESHOLD_5M).astype(float)
     return out

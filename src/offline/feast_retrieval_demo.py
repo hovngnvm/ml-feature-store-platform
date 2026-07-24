@@ -1,27 +1,20 @@
-"""
-Feast Historical & Online Feature Retrieval Demo Validator Script.
+"""Feast Historical & Online Feature Retrieval Demo Validator Script.
 
 Verifies point-in-time offline feature retrieval and online feature vector lookups.
 """
 
-import os
-import sys
+from pathlib import Path
 from datetime import datetime, timezone
 import pandas as pd
 
 from src.config.settings import settings
 from src.utils.logger import get_logger
 
-logger = get_logger("feast_retrieval_demo")
+logger = get_logger(__name__)
 
 
 def run_feast_retrieval_demo() -> None:
-    """
-    Executes Feast FeatureStore validation pipeline:
-    - Materializes batch features into Redis online store.
-    - Tests offline point-in-time historical feature retrieval.
-    - Tests online low-latency feature retrieval.
-    """
+    """Executes Feast FeatureStore validation pipeline."""
     from feast import FeatureStore
 
     logger.info(f"Initializing Feast FeatureStore from repository: {settings.feature_repo_dir}")
@@ -39,11 +32,12 @@ def run_feast_retrieval_demo() -> None:
     logger.info("Feast Materialization of batch features completed successfully.")
 
     # Fetch sample card IDs & timestamps from offline store
-    if not os.path.exists(settings.batch_parquet_path):
-        logger.warning(f"Batch Parquet file not found at '{settings.batch_parquet_path}'. Run batch feature job first.")
+    batch_parquet = Path(settings.batch_parquet_path)
+    if not batch_parquet.exists():
+        logger.warning(f"Batch Parquet file not found at '{batch_parquet}'. Run batch feature job first.")
         return
 
-    df_sample = pd.read_parquet(settings.batch_parquet_path).head(3)
+    df_sample = pd.read_parquet(batch_parquet).head(3)
     sample_card_ids = df_sample["card_id"].astype(str).tolist()
     parquet_timestamps = df_sample["event_timestamp"].tolist()
     logger.info(f"Sample card IDs from offline store: {sample_card_ids}")
@@ -66,6 +60,7 @@ def run_feast_retrieval_demo() -> None:
     ).to_df()
 
     logger.info(f"Historical Training DataFrame Shape: {training_df.shape}")
+    assert not training_df.empty, "Historical training DataFrame must not be empty"
 
     # Test Online Low-Latency Feature Retrieval
     logger.info("Testing Online Feature Retrieval (Online Store Lookup + On-Demand Calculation)...")
@@ -87,9 +82,13 @@ def run_feast_retrieval_demo() -> None:
         entity_rows=entity_rows
     ).to_dict()
 
-    response_df = pd.DataFrame(response)
+    assert "card_id" in response, "Response must contain 'card_id' field"
     logger.info("Online Feature Vector Response retrieved successfully.")
     logger.info("Feast Repository & Materialization Verification PASSED.")
+
+
+if __name__ == "__main__":
+    run_feast_retrieval_demo()
 
 
 if __name__ == "__main__":

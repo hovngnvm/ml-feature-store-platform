@@ -14,7 +14,6 @@ joblib>=1.3.0
 matplotlib>=3.8.0
 seaborn>=0.13.0
 kafka-python-ng>=2.2.0
-confluent-kafka>=2.3.0
 streamlit>=1.32.0
 python-dotenv>=1.0.0
 pydantic>=2.6.0
@@ -26,4 +25,5 @@ pandera>=0.20.0
 prefect>=3.0.0
 prometheus-client>=0.20.0
 evidently>=0.4.0
-
+minio>=7.2.0
+plotly>=5.18.0

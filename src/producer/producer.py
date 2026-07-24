@@ -1,12 +1,4 @@
-"""
-High-Frequency Redpanda / Kafka Transaction Stream Producer.
-
-Simulates real-time transaction events, normal purchase patterns, fraud bursts,
-and corrupt test payloads for DLQ side output testing.
-"""
-
-import os
-import sys
+from pathlib import Path
 import time
 import json
 import random
@@ -20,7 +12,7 @@ from src.config.settings import settings
 from src.utils.logger import get_logger
 
 load_dotenv()
-logger = get_logger("producer")
+logger = get_logger(__name__)
 
 
 def create_stream_producer(broker_address: str) -> KafkaProducer:
@@ -31,13 +23,13 @@ def create_stream_producer(broker_address: str) -> KafkaProducer:
             key_serializer=lambda k: str(k).encode("utf-8") if k is not None else None,
             acks="all",
             retries=3,
-            linger_ms=10
+            linger_ms=10,
         )
         logger.info(f"Connected to Stream Broker (Redpanda) at {broker_address}")
         return producer
     except Exception as e:
         logger.error(f"Failed to create Stream producer at {broker_address}: {e}")
-        sys.exit(1)
+        raise ConnectionError(f"Failed to create Stream producer at {broker_address}: {e}")
 
 
 def format_event(row: pd.Series, base_time: float = None, inject_corrupt: bool = False) -> dict:
@@ -171,11 +163,12 @@ def stream_transactions(
     limit: int | None = None,
     delay: float = 0.01,
     corrupt_rate: float = 0.0,
-    synthetic: bool = True
+    synthetic: bool = True,
 ) -> None:
-    if not os.path.exists(dataset_path):
+    path_obj = Path(dataset_path)
+    if not path_obj.exists():
         logger.error(f"Dataset file not found at: {dataset_path}")
-        sys.exit(1)
+        raise FileNotFoundError(f"Dataset file not found at: {dataset_path}")
 
     logger.info(f"Loading dataset from: {dataset_path}")
     producer = create_stream_producer(broker)
@@ -191,7 +184,7 @@ def stream_transactions(
     chunk_size = 5000
 
     last_transaction_id = 2987000
-    last_transaction_dt = 86400.0
+    last_transaction_dt = float(SECONDS_PER_DAY)
 
     card_pool = set()
     product_pool = set()
@@ -202,109 +195,115 @@ def stream_transactions(
     c1_pool = set()
     c2_pool = set()
 
-    for chunk in pd.read_csv(dataset_path, usecols=columns, chunksize=chunk_size):
-        chunk = chunk.sort_values(by="TransactionDT")
+    if not Path(dataset_path).is_file():
+        raise FileNotFoundError(f"Transaction dataset CSV not found at: '{dataset_path}'")
 
-        if len(card_pool) < 5000:
-            card_pool.update(chunk["card1"].dropna().astype(int).astype(str).unique())
-        if len(product_pool) < 20:
-            product_pool.update(chunk["ProductCD"].dropna().astype(str).unique())
-        if len(card_type_pool) < 10:
-            card_type_pool.update(chunk["card4"].dropna().astype(str).unique())
-        if len(card_cat_pool) < 10:
-            card_cat_pool.update(chunk["card6"].dropna().astype(str).unique())
-        if len(email_pool) < 50:
-            email_pool.update(chunk["P_emaildomain"].dropna().astype(str).unique())
-        if len(addr1_pool) < 100:
-            addr1_pool.update(chunk["addr1"].dropna().astype(float).unique())
-        if len(c1_pool) < 50:
-            c1_pool.update(chunk["C1"].dropna().astype(float).unique())
-        if len(c2_pool) < 50:
-            c2_pool.update(chunk["C2"].dropna().astype(float).unique())
+    try:
+        for chunk in pd.read_csv(dataset_path, usecols=columns, chunksize=chunk_size):
+            chunk = chunk.sort_values(by="TransactionDT")
 
-        for _, row in chunk.iterrows():
-            is_corrupt = (corrupt_rate > 0.0) and (random.random() < corrupt_rate)
-            event = format_event(row, base_time=start_time, inject_corrupt=is_corrupt)
-            card_id = event["card_id"]
+            if len(card_pool) < 5000:
+                card_pool.update(chunk["card1"].dropna().astype(int).astype(str).unique())
+            if len(product_pool) < 20:
+                product_pool.update(chunk["ProductCD"].dropna().astype(str).unique())
+            if len(card_type_pool) < 10:
+                card_type_pool.update(chunk["card4"].dropna().astype(str).unique())
+            if len(card_cat_pool) < 10:
+                card_cat_pool.update(chunk["card6"].dropna().astype(str).unique())
+            if len(email_pool) < 50:
+                email_pool.update(chunk["P_emaildomain"].dropna().astype(str).unique())
+            if len(addr1_pool) < 100:
+                addr1_pool.update(chunk["addr1"].dropna().astype(float).unique())
+            if len(c1_pool) < 50:
+                c1_pool.update(chunk["C1"].dropna().astype(float).unique())
+            if len(c2_pool) < 50:
+                c2_pool.update(chunk["C2"].dropna().astype(float).unique())
 
-            last_transaction_id = max(last_transaction_id, event["transaction_id"])
-            last_transaction_dt = max(last_transaction_dt, event["transaction_dt"])
+            for _, row in chunk.iterrows():
+                is_corrupt = (corrupt_rate > 0.0) and (random.random() < corrupt_rate)
+                event = format_event(row, base_time=start_time, inject_corrupt=is_corrupt)
+                card_id = event["card_id"]
 
-            if is_corrupt:
-                corrupt_sent += 1
+                last_transaction_id = max(last_transaction_id, event["transaction_id"])
+                last_transaction_dt = max(last_transaction_dt, event["transaction_dt"])
 
-            producer.send(topic, key=card_id, value=event)
-            total_sent += 1
+                if is_corrupt:
+                    corrupt_sent += 1
 
-            if total_sent % 500 == 0:
-                elapsed = time.time() - start_time
-                rate = total_sent / elapsed if elapsed > 0 else 0
-                logger.info(
-                    f"[DATASET] Sent {total_sent} events ({corrupt_sent} corrupt) | Rate: {rate:.1f} msg/s | "
-                    f"Sample Card ID: {card_id} | Amount: ${event['amount']:.2f} | Fraud: {event['is_fraud']}"
+                producer.send(topic, key=card_id, value=event)
+                total_sent += 1
+
+                if total_sent % 500 == 0:
+                    elapsed = time.time() - start_time
+                    rate = total_sent / elapsed if elapsed > 0 else 0
+                    logger.info(
+                        f"[DATASET] Sent {total_sent} events ({corrupt_sent} corrupt) | Rate: {rate:.1f} msg/s | "
+                        f"Sample Card ID: {card_id} | Amount: ${event['amount']:.2f} | Fraud: {event['is_fraud']}"
+                    )
+
+                if limit and limit > 0 and total_sent >= limit:
+                    logger.info(f"Reached event limit ({limit}). Stopping producer.")
+                    producer.flush()
+                    return
+
+                if delay > 0:
+                    time.sleep(delay)
+
+        logger.info(f"Finished dataset file. Total dataset events sent: {total_sent}.")
+
+        pools = {
+            "card_ids": list(card_pool),
+            "product_cds": list(product_pool),
+            "card_types": list(card_type_pool),
+            "card_categories": list(card_cat_pool),
+            "p_emaildomains": list(email_pool),
+            "addr1_list": list(addr1_pool),
+            "c1_list": list(c1_pool),
+            "c2_list": list(c2_pool),
+        }
+
+        if synthetic:
+            logger.info("Switching seamlessly to continuous synthetic event generation...")
+            while True:
+                if limit and limit > 0 and total_sent >= limit:
+                    logger.info(f"Reached event limit ({limit}). Stopping producer.")
+                    break
+
+                last_transaction_id += 1
+                last_transaction_dt += random.uniform(0.5, 3.0)
+
+                is_corrupt = (corrupt_rate > 0.0) and (random.random() < corrupt_rate)
+                event = generate_synthetic_event(
+                    transaction_id=last_transaction_id,
+                    transaction_dt=last_transaction_dt,
+                    base_time=start_time,
+                    pools=pools,
+                    inject_corrupt=is_corrupt,
                 )
+                card_id = event["card_id"]
 
-            if limit and limit > 0 and total_sent >= limit:
-                logger.info(f"Reached event limit ({limit}). Stopping producer.")
-                producer.flush()
-                return
+                if is_corrupt:
+                    corrupt_sent += 1
 
-            if delay > 0:
-                time.sleep(delay)
+                producer.send(topic, key=card_id, value=event)
+                total_sent += 1
 
-    logger.info(f"Finished dataset file. Total dataset events sent: {total_sent}.")
+                if total_sent % 500 == 0:
+                    elapsed = time.time() - start_time
+                    rate = total_sent / elapsed if elapsed > 0 else 0
+                    logger.info(
+                        f"[SYNTHETIC] Sent {total_sent} events ({corrupt_sent} corrupt) | Rate: {rate:.1f} msg/s | "
+                        f"TxID: {last_transaction_id} | Card: {card_id} | Amount: ${event['amount']:.2f} | Fraud: {event['is_fraud']}"
+                    )
 
-    pools = {
-        "card_ids": list(card_pool),
-        "product_cds": list(product_pool),
-        "card_types": list(card_type_pool),
-        "card_categories": list(card_cat_pool),
-        "p_emaildomains": list(email_pool),
-        "addr1_list": list(addr1_pool),
-        "c1_list": list(c1_pool),
-        "c2_list": list(c2_pool),
-    }
+                if delay > 0:
+                    time.sleep(delay)
 
-    if synthetic:
-        logger.info("Switching seamlessly to continuous synthetic event generation...")
-        while True:
-            if limit and limit > 0 and total_sent >= limit:
-                logger.info(f"Reached event limit ({limit}). Stopping producer.")
-                break
-
-            last_transaction_id += 1
-            last_transaction_dt += random.uniform(0.5, 3.0)
-
-            is_corrupt = (corrupt_rate > 0.0) and (random.random() < corrupt_rate)
-            event = generate_synthetic_event(
-                transaction_id=last_transaction_id,
-                transaction_dt=last_transaction_dt,
-                base_time=start_time,
-                pools=pools,
-                inject_corrupt=is_corrupt
-            )
-            card_id = event["card_id"]
-
-            if is_corrupt:
-                corrupt_sent += 1
-
-            producer.send(topic, key=card_id, value=event)
-            total_sent += 1
-
-            if total_sent % 500 == 0:
-                elapsed = time.time() - start_time
-                rate = total_sent / elapsed if elapsed > 0 else 0
-                logger.info(
-                    f"[SYNTHETIC] Sent {total_sent} events ({corrupt_sent} corrupt) | Rate: {rate:.1f} msg/s | "
-                    f"TxID: {last_transaction_id} | Card: {card_id} | Amount: ${event['amount']:.2f} | Fraud: {event['is_fraud']}"
-                )
-
-            if delay > 0:
-                time.sleep(delay)
-
-    producer.flush()
-    elapsed = time.time() - start_time
-    logger.info(f"Completed streaming {total_sent} events ({corrupt_sent} corrupt) in {elapsed:.2f} seconds.")
+        producer.flush()
+        elapsed = time.time() - start_time
+        logger.info(f"Completed streaming {total_sent} events ({corrupt_sent} corrupt) in {elapsed:.2f} seconds.")
+    finally:
+        producer.close()
 
 
 if __name__ == "__main__":
@@ -325,5 +324,5 @@ if __name__ == "__main__":
         limit=args.limit,
         delay=args.delay,
         corrupt_rate=args.corrupt_rate,
-        synthetic=not args.no_synthetic
+        synthetic=not args.no_synthetic,
     )

@@ -1,12 +1,10 @@
-"""
-Batch Feature Analytical Pipeline Engine (DuckDB & Hive Lakehouse).
+"""Batch Feature Analytical Pipeline Engine (DuckDB & Hive Lakehouse).
 
 Computes 7d and 30d windowed aggregations over historical transactions using DuckDB,
 exports Hive-partitioned Parquet files, and syncs Lakehouse partitions to MinIO S3.
 """
 
-import os
-import sys
+from pathlib import Path
 import time
 from datetime import datetime, timezone
 import duckdb
@@ -16,10 +14,10 @@ from src.config.settings import settings
 from src.utils.logger import get_logger
 
 load_dotenv()
-logger = get_logger("batch_feature_job")
+logger = get_logger(__name__)
 
 
-def upload_folder_to_minio(local_folder: str, bucket_name: str, minio_prefix: str = "batch_features") -> None:
+def upload_folder_to_minio(local_folder: str | Path, bucket_name: str, minio_prefix: str = "batch_features") -> None:
     """Recursively uploads local Hive-partitioned Parquet files to MinIO S3 Lakehouse bucket."""
     try:
         from minio import Minio
@@ -27,53 +25,49 @@ def upload_folder_to_minio(local_folder: str, bucket_name: str, minio_prefix: st
             settings.minio_endpoint,
             access_key=settings.minio_access_key,
             secret_key=settings.minio_secret_key,
-            secure=False
+            secure=settings.minio_secure,
         )
 
         if not client.bucket_exists(bucket_name):
             client.make_bucket(bucket_name)
 
+        folder_path = Path(local_folder)
         count = 0
-        for root, _, files in os.walk(local_folder):
-            for file in files:
-                if file.endswith(".parquet"):
-                    local_file = os.path.join(root, file)
-                    rel_path = os.path.relpath(local_file, local_folder).replace("\\", "/")
-                    s3_object_name = f"{minio_prefix}/{rel_path}"
-                    client.fput_object(bucket_name, s3_object_name, local_file)
-                    count += 1
+        if folder_path.exists():
+            for parquet_file in folder_path.rglob("*.parquet"):
+                rel_path = parquet_file.relative_to(folder_path).as_posix()
+                s3_object_name = f"{minio_prefix}/{rel_path}"
+                client.fput_object(bucket_name, s3_object_name, str(parquet_file))
+                count += 1
 
         logger.info(f"[Lakehouse Sync] Uploaded {count} partitioned Parquet files -> MinIO S3 's3://{bucket_name}/{minio_prefix}/'")
     except Exception as e:
         logger.warning(f"Failed to sync partitioned Lakehouse to MinIO S3: {e}")
 
 
-def run_batch_feature_pipeline(dataset_path: str = settings.raw_csv_path) -> str:
-    """
-    Executes DuckDB Batch Feature Pipeline with Hive Partitioning & DQ Gate Check:
-    1. Reads raw transaction dataset into DuckDB.
-    2. Computes historical batch features.
-    3. Exports result to Hive Partitioned Data Lakehouse (`year=YYYY/month=MM/day=DD/`).
-    4. Validates features via Pandera Data Quality Engine.
-    5. Syncs Lakehouse Parquet partitions to MinIO S3 offline store.
-    """
-    if not os.path.exists(dataset_path):
-        logger.error(f"Dataset not found at: {dataset_path}")
-        sys.exit(1)
+def run_batch_feature_pipeline(dataset_path: str | Path = settings.raw_csv_path) -> str:
+    """Executes DuckDB Batch Feature Pipeline with Hive Partitioning & DQ Gate Check."""
+    path_dataset = Path(dataset_path)
+    if not path_dataset.is_file():
+        logger.error(f"Dataset not found at: {path_dataset}")
+        raise FileNotFoundError(f"Dataset not found at: {path_dataset}")
 
     now = datetime.now(timezone.utc)
     year_str = f"{now.year}"
     month_str = f"{now.month:02d}"
     day_str = f"{now.day:02d}"
 
-    partition_dir = os.path.join(settings.lakehouse_base_dir, f"year={year_str}", f"month={month_str}", f"day={day_str}")
-    os.makedirs(partition_dir, exist_ok=True)
-    partition_file = os.path.join(partition_dir, "batch_part_000.parquet")
+    partition_dir = Path(settings.lakehouse_base_dir) / f"year={year_str}" / f"month={month_str}" / f"day={day_str}"
+    partition_dir.mkdir(parents=True, exist_ok=True)
+    partition_file = partition_dir / "batch_part_000.parquet"
 
-    logger.info(f"Starting DuckDB Batch Feature Engine on dataset: {dataset_path}")
+    logger.info(f"Starting DuckDB Batch Feature Engine on dataset: {path_dataset}")
     start_time = time.time()
 
     con = duckdb.connect(database=":memory:")
+    dataset_path_str = path_dataset.as_posix()
+    partition_file_str = partition_file.as_posix()
+    batch_parquet_str = Path(settings.batch_parquet_path).as_posix()
 
     con.execute(f"""
         CREATE VIEW raw_transactions AS
@@ -85,12 +79,12 @@ def run_batch_feature_pipeline(dataset_path: str = settings.raw_csv_path) -> str
             CAST(card1 AS VARCHAR) AS card_id,
             CAST(addr1 AS DOUBLE) AS addr1,
             CAST(D4 AS DOUBLE) AS d4
-        FROM read_csv_auto('{dataset_path}')
+        FROM read_csv_auto('{dataset_path_str}')
         WHERE card1 IS NOT NULL;
     """)
 
     logger.info("Computing 6 Historical Batch Features (7d/30d/All-time aggregations)...")
-    
+
     batch_features_df = con.execute("""
         SELECT
             card_id,
@@ -107,21 +101,25 @@ def run_batch_feature_pipeline(dataset_path: str = settings.raw_csv_path) -> str
     """).df()
 
     logger.info(f"Computed batch features for {len(batch_features_df):,} unique cards.")
-    
+
     try:
         from src.quality.data_assert import validate_batch_dataframe
         is_valid, clean_df, error_df = validate_batch_dataframe(batch_features_df)
         if not is_valid:
-            logger.warning("[DQ Gate Warning] Batch features contained invalid rows; proceed with sanitized DataFrame.")
-            batch_features_df = clean_df
+            if clean_df is not None and not clean_df.empty:
+                logger.warning("[DQ Gate Warning] Batch features contained invalid rows; proceed with sanitized DataFrame.")
+                batch_features_df = clean_df
+            else:
+                raise ValueError("[DQ Gate Error] All batch feature rows failed data quality validation.")
     except Exception as e:
-        logger.warning(f"Could not run Pandera Data Quality Gate check: {e}")
+        logger.error(f"Pandera Data Quality Gate check failure: {e}")
+        raise
 
-    con.execute(f"COPY (SELECT * FROM batch_features_df) TO '{partition_file}' (FORMAT PARQUET);")
-    
+    con.execute(f"COPY (SELECT * FROM batch_features_df) TO '{partition_file_str}' (FORMAT PARQUET);")
+
     # Also save single file for Feast default path compatibility
-    os.makedirs(os.path.dirname(settings.batch_parquet_path), exist_ok=True)
-    con.execute(f"COPY (SELECT * FROM batch_features_df) TO '{settings.batch_parquet_path}' (FORMAT PARQUET);")
+    Path(settings.batch_parquet_path).parent.mkdir(parents=True, exist_ok=True)
+    con.execute(f"COPY (SELECT * FROM batch_features_df) TO '{batch_parquet_str}' (FORMAT PARQUET);")
     con.close()
 
     elapsed = time.time() - start_time
@@ -132,7 +130,7 @@ def run_batch_feature_pipeline(dataset_path: str = settings.raw_csv_path) -> str
         bucket_name=settings.minio_bucket,
         minio_prefix="batch_features"
     )
-    return partition_file
+    return str(partition_file)
 
 
 if __name__ == "__main__":
