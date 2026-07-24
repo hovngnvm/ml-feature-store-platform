@@ -1,11 +1,10 @@
-"""
-Data Quality Assertion Engine (Pandera Schemas).
+"""Data Quality Assertion Engine (Pandera Schemas).
 
 Validates DataFrame structure, value bounds, and non-null constraints before committing to Lakehouse.
 Quarantines invalid rows into Batch DLQ Parquet files.
 """
 
-import os
+from pathlib import Path
 import pandas as pd
 from pandera.pandas import Column, Check, DataFrameSchema
 from pandera.errors import SchemaErrors
@@ -13,9 +12,13 @@ from pandera.errors import SchemaErrors
 from src.config.settings import settings
 from src.utils.logger import get_logger
 
-logger = get_logger("data_assert")
+logger = get_logger(__name__)
 
-BATCH_DLQ_PATH = os.path.join(settings.dlq_dir, "batch_errors.parquet")
+MAX_VALID_TRANSACTION_AMOUNT: float = 500_000.0
+INVALID_CARD_SENTINEL: str = "unknown_card"
+MAX_ALLOWED_NULL_RATIO: float = 0.001
+
+BATCH_DLQ_PATH = Path(settings.dlq_dir) / "batch_errors.parquet"
 
 BatchFeatureSchema = DataFrameSchema(
     columns={
@@ -24,7 +27,7 @@ BatchFeatureSchema = DataFrameSchema(
             nullable=False,
             checks=[
                 Check(lambda s: s.str.strip().str.len() > 0, name="non_empty_card_id"),
-                Check(lambda s: s != "unknown_card", name="valid_card_id")
+                Check(lambda s: s != INVALID_CARD_SENTINEL, name="valid_card_id"),
             ]
         ),
         "trans_count_7d": Column(int, nullable=False, checks=Check.ge(0)),
@@ -32,36 +35,15 @@ BatchFeatureSchema = DataFrameSchema(
         "avg_amount_30d": Column(
             float,
             nullable=False,
-            checks=[Check.gt(0.0), Check.le(500000.0)]
+            checks=[Check.gt(0.0), Check.le(MAX_VALID_TRANSACTION_AMOUNT)]
         ),
         "max_amount_30d": Column(
             float,
             nullable=False,
-            checks=[Check.gt(0.0), Check.le(500000.0)]
+            checks=[Check.gt(0.0), Check.le(MAX_VALID_TRANSACTION_AMOUNT)]
         ),
         "distinct_addr_7d": Column(int, nullable=False, checks=Check.ge(0)),
         "days_since_last_trans": Column(float, nullable=False, checks=Check.ge(0.0)),
-    },
-    coerce=True,
-    strict=False
-)
-
-StreamEventSchema = DataFrameSchema(
-    columns={
-        "transaction_id": Column(int, nullable=False, checks=Check.gt(0)),
-        "card_id": Column(
-            str,
-            nullable=False,
-            checks=[
-                Check(lambda s: s.str.strip().str.len() > 0, name="non_empty_card_id"),
-                Check(lambda s: s != "unknown_card", name="valid_card_id")
-            ]
-        ),
-        "amount": Column(
-            float,
-            nullable=False,
-            checks=[Check.gt(0.0), Check.le(500000.0)]
-        ),
     },
     coerce=True,
     strict=False
@@ -74,9 +56,8 @@ def validate_batch_dataframe(df: pd.DataFrame) -> tuple[bool, pd.DataFrame, pd.D
         logger.error("[DQ Gate] DataFrame is EMPTY! Data Quality assertion failed.")
         return False, df, None
 
-    # Check null ratio
-    null_ratio = df.isnull().mean().max()
-    if null_ratio > 0.001:  # > 0.1% null
+    null_ratio = float(df.isnull().mean().max())
+    if null_ratio > MAX_ALLOWED_NULL_RATIO:
         logger.warning(f"[DQ Gate Warning] Max null ratio across columns is {null_ratio:.4%}")
 
     try:
@@ -85,23 +66,24 @@ def validate_batch_dataframe(df: pd.DataFrame) -> tuple[bool, pd.DataFrame, pd.D
         return True, validated_df, None
     except SchemaErrors as err:
         logger.error(f"[DQ Gate FAILED] Found schema violations in {len(err.failure_cases)} instances.")
-        
+
         failure_cases = err.failure_cases
-        invalid_indices = failure_cases["index"].dropna().astype(int).unique()
-        
-        error_df = df.iloc[invalid_indices].copy()
-        clean_df = df.drop(index=invalid_indices).copy()
-        
-        os.makedirs(settings.dlq_dir, exist_ok=True)
-        error_df.to_parquet(BATCH_DLQ_PATH, index=False)
-        logger.warning(f"[DLQ Isolation] Quarantined {len(error_df)} invalid records to '{BATCH_DLQ_PATH}'")
-        
+        invalid_indices = failure_cases["index"].dropna().unique()
+
+        error_df = df.loc[df.index.isin(invalid_indices)].copy()
+        clean_df = df.loc[~df.index.isin(invalid_indices)].copy()
+
+        BATCH_DLQ_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if not error_df.empty:
+            error_df.to_parquet(BATCH_DLQ_PATH, index=False)
+            logger.warning(f"[DLQ Isolation] Quarantined {len(error_df)} invalid records to '{BATCH_DLQ_PATH}'")
+
         return False, clean_df, error_df
 
 
 if __name__ == "__main__":
     logger.info("Running Data Quality Assertion Engine Self-Test...")
-    
+
     sample_valid = pd.DataFrame([{
         "card_id": "11556",
         "trans_count_7d": 5,
@@ -109,12 +91,12 @@ if __name__ == "__main__":
         "avg_amount_30d": 150.50,
         "max_amount_30d": 500.00,
         "distinct_addr_7d": 2,
-        "days_since_last_trans": 1.2
+        "days_since_last_trans": 1.2,
     }])
-    
+
     is_valid, clean, errs = validate_batch_dataframe(sample_valid)
     assert is_valid, "Valid sample failed validation!"
-    
+
     sample_corrupt = pd.DataFrame([
         {
             "card_id": "11556",
@@ -123,7 +105,7 @@ if __name__ == "__main__":
             "avg_amount_30d": 150.50,
             "max_amount_30d": 500.00,
             "distinct_addr_7d": 2,
-            "days_since_last_trans": 1.2
+            "days_since_last_trans": 1.2,
         },
         {
             "card_id": "unknown_card",
@@ -132,10 +114,10 @@ if __name__ == "__main__":
             "avg_amount_30d": -99.0,
             "max_amount_30d": 50.0,
             "distinct_addr_7d": 1,
-            "days_since_last_trans": 0.0
+            "days_since_last_trans": 0.0,
         }
     ])
-    
+
     is_valid_c, clean_c, errs_c = validate_batch_dataframe(sample_corrupt)
     assert not is_valid_c, "Corrupt sample incorrectly passed validation!"
     assert len(clean_c) == 1, "Expected 1 clean row"

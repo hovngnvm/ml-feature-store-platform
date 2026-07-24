@@ -1,5 +1,5 @@
-"""
-Standalone Model Ensemble Module for Real-Time Fraud Detection.
+"""Standalone Model Ensemble Module for Real-Time Fraud Detection.
+
 Eradicates __main__ serialization monkey-patching anti-patterns.
 """
 
@@ -19,17 +19,23 @@ class FraudModelEnsemble:
         xgb_weight: float = 0.5,
         lgb_weight: float = 0.5,
         optimal_threshold: float = 0.5,
-        threshold_metrics: dict | None = None
+        threshold_metrics: dict[str, Any] | None = None,
     ) -> None:
+        total_weight = xgb_weight + lgb_weight
+        if abs(total_weight - 1.0) > 1e-6:
+            raise ValueError(f"Ensemble weights must sum to 1.0 (got xgb={xgb_weight}, lgb={lgb_weight})")
+
         self.xgb_model = xgb_model
         self.lgb_model = lgb_model
+        self._estimator_type = "classifier"
+        self.classes_ = np.array([0, 1])
         self.feature_names = feature_names
         self.xgb_weight = xgb_weight
         self.lgb_weight = lgb_weight
         self.optimal_threshold = optimal_threshold
-        self.threshold_metrics = threshold_metrics or {}
+        self.threshold_metrics: dict[str, Any] = threshold_metrics or {}
 
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+    def predict_proba(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
         """Returns 2D array of class probabilities [[p0, p1], ...]."""
         if isinstance(X, pd.DataFrame):
             X = X[self.feature_names]
@@ -39,7 +45,7 @@ class FraudModelEnsemble:
         p0_ensemble = 1.0 - p1_ensemble
         return np.column_stack((p0_ensemble, p1_ensemble))
 
-    def predict(self, X: pd.DataFrame, threshold: float | None = None) -> np.ndarray:
+    def predict(self, X: pd.DataFrame | np.ndarray, threshold: float | None = None) -> np.ndarray:
         """Returns binary predictions based on decision threshold (defaults to optimal_threshold)."""
         if threshold is None:
             threshold = self.optimal_threshold

@@ -1,13 +1,11 @@
-"""
-Offline Model Evaluation & Benchmark Exporter with Dynamic Threshold & Cost Curve Analysis.
+"""Offline Model Evaluation & Benchmark Exporter with Dynamic Threshold & Cost Curve Analysis.
 
 Evaluates XGBoost, LightGBM, and Model Ensemble performance metrics,
 generating ROC Curves, Precision-Recall Curves, Confusion Matrix plots,
 and Financial Cost Optimization Curves vs Decision Thresholds.
 """
 
-import os
-import sys
+from pathlib import Path
 import joblib
 import pandas as pd
 import numpy as np
@@ -20,43 +18,54 @@ from sklearn.metrics import (
     confusion_matrix,
     classification_report
 )
+from sklearn.model_selection import train_test_split
 
 from src.config.settings import settings
 from src.utils.logger import get_logger
 from src.ml.ensemble import FraudModelEnsemble
+from src.ml.train import (
+    DEFAULT_TEST_SIZE,
+    RANDOM_SEED,
+    THRESHOLD_START,
+    THRESHOLD_END,
+    THRESHOLD_STEPS,
+    EPSILON,
+)
 
-logger = get_logger("ml_evaluate")
+logger = get_logger(__name__)
 
 
 def evaluate_models() -> None:
     """Executes offline evaluation pipeline and exports benchmark plots."""
     logger.info("Starting Offline Model Evaluation & Plot Export Pipeline...")
-    if not os.path.exists(settings.model_artifact_path) or not os.path.exists(settings.ml_dataset_path):
-        logger.error("Model artifact or dataset missing! Please run prepare_dataset.py and train.py first.")
-        return
+    path_model = Path(settings.model_artifact_path)
+    path_dataset = Path(settings.ml_dataset_path)
+    if not path_model.exists() or not path_dataset.exists():
+        raise FileNotFoundError("Model artifact or dataset missing! Run prepare_dataset.py and train.py first.")
 
-    model_pipeline = joblib.load(settings.model_artifact_path)
-    df = pd.read_parquet(settings.ml_dataset_path)
+    model_pipeline: FraudModelEnsemble = joblib.load(path_model)
+    df = pd.read_parquet(path_dataset)
 
     feature_cols = model_pipeline.feature_names
     X = df[feature_cols]
     y = df["is_fraud"].values
 
     # Use the exact same Stratified Validation Split as train.py
-    from sklearn.model_selection import train_test_split
     X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X, y, test_size=DEFAULT_TEST_SIZE, random_state=RANDOM_SEED, stratify=y
     )
     amounts_val = X_val["TransactionAmt"].values if "TransactionAmt" in X_val.columns else np.ones(len(X_val)) * 100.0
 
-    optimal_th = getattr(model_pipeline, "optimal_threshold", 0.5)
+    optimal_th = float(getattr(model_pipeline, "optimal_threshold", 0.5))
 
     logger.info(f"Evaluating Model Ensemble on Stratified Validation Set ({len(X_val):,} samples, Trained Optimal Threshold = {optimal_th:.4f})...")
-
 
     y_prob_xgb = model_pipeline.xgb_model.predict_proba(X_val)[:, 1]
     y_prob_lgb = model_pipeline.lgb_model.predict_proba(X_val)[:, 1]
     y_prob_ens = model_pipeline.predict_proba(X_val)[:, 1]
+
+    model_dir_path = Path(settings.model_dir)
+    model_dir_path.mkdir(parents=True, exist_ok=True)
 
     # ROC Curve
     plt.figure(figsize=(8, 6))
@@ -73,7 +82,7 @@ def evaluate_models() -> None:
     plt.ylabel("True Positive Rate")
     plt.legend(loc="lower right")
     plt.grid(True, alpha=0.3)
-    roc_path = os.path.join(settings.model_dir, "roc_curve.png")
+    roc_path = model_dir_path / "roc_curve.png"
     plt.savefig(roc_path, dpi=300, bbox_inches="tight")
     plt.close()
     logger.info(f"Saved ROC Curve plot to '{roc_path}'")
@@ -92,13 +101,13 @@ def evaluate_models() -> None:
     plt.ylabel("Precision")
     plt.legend(loc="upper right")
     plt.grid(True, alpha=0.3)
-    pr_path = os.path.join(settings.model_dir, "pr_curve.png")
+    pr_path = model_dir_path / "pr_curve.png"
     plt.savefig(pr_path, dpi=300, bbox_inches="tight")
     plt.close()
     logger.info(f"Saved Precision-Recall Curve plot to '{pr_path}'")
 
     # Financial Cost Curve vs Decision Threshold
-    thresholds = np.linspace(0.01, 0.90, 90)
+    thresholds = np.linspace(THRESHOLD_START, THRESHOLD_END, THRESHOLD_STEPS)
     total_costs = []
     fn_costs = []
     fp_costs = []
@@ -125,12 +134,12 @@ def evaluate_models() -> None:
         fp = float(fp_mask.sum())
         fn = float(fn_mask.sum())
 
-        p = tp / (tp + fp + 1e-9)
-        r = tp / (tp + fn + 1e-9)
+        p = tp / (tp + fp + EPSILON)
+        r = tp / (tp + fn + EPSILON)
         precisions.append(p)
         recalls.append(r)
-        f1_scores.append((2 * p * r) / (p + r + 1e-9))
-        f2_scores.append((5 * p * r) / (4 * p + r + 1e-9))
+        f1_scores.append((2 * p * r) / (p + r + EPSILON))
+        f2_scores.append((5 * p * r) / (4 * p + r + EPSILON))
 
     optimal_th = float(getattr(model_pipeline, "optimal_threshold", thresholds[int(np.argmin(total_costs))]))
     opt_idx = int(np.argmin(np.abs(thresholds - optimal_th)))
@@ -143,12 +152,11 @@ def evaluate_models() -> None:
     plt.plot(thresholds, total_costs, label="Total Financial Loss ($)", color="crimson", linewidth=2.5)
     plt.plot(thresholds, fn_costs, label="False Negative Loss (Missed Fraud $)", color="darkorange", linestyle="--")
     plt.plot(thresholds, fp_costs, label=f"False Positive Loss (Verification @ ${cost_fp:.1f})", color="navy", linestyle=":")
-    
+
     plt.scatter([optimal_th], [opt_cost_val], color="darkgreen", s=120, zorder=5,
                 label=f"Optimal Threshold = {optimal_th:.4f} (Loss: ${opt_cost_val:,.2f})")
     plt.scatter([0.50], [cost_05_val], color="black", s=100, zorder=5,
                 label=f"Default 0.50 Threshold (Loss: ${cost_05_val:,.2f})")
-
 
     plt.title("Financial Cost Curve vs Decision Threshold (Cost Matrix Optimization)", fontsize=13)
     plt.xlabel("Decision Threshold (θ)", fontsize=11)
@@ -156,7 +164,7 @@ def evaluate_models() -> None:
     plt.legend(loc="upper center")
     plt.grid(True, alpha=0.3)
 
-    cost_plot_path = os.path.join(settings.model_dir, "cost_vs_threshold.png")
+    cost_plot_path = model_dir_path / "cost_vs_threshold.png"
     plt.savefig(cost_plot_path, dpi=300, bbox_inches="tight")
     plt.close()
     logger.info(f"Saved Financial Cost Curve plot to '{cost_plot_path}'")
@@ -169,14 +177,13 @@ def evaluate_models() -> None:
     plt.plot(thresholds, f2_scores, label="F2-Score (Recall Prioritized)", color="crimson", linestyle="-.", linewidth=2)
     plt.axvline(x=optimal_th, color="darkgreen", linestyle=":", label=f"Cost-Optimal θ = {optimal_th:.4f}")
 
-
     plt.title("Metric Trade-offs (Precision, Recall, F1, F2) vs Decision Threshold", fontsize=13)
     plt.xlabel("Decision Threshold (θ)", fontsize=11)
     plt.ylabel("Metric Score (0.0 - 1.0)", fontsize=11)
     plt.legend(loc="center right")
     plt.grid(True, alpha=0.3)
 
-    tradeoff_plot_path = os.path.join(settings.model_dir, "threshold_tradeoffs.png")
+    tradeoff_plot_path = model_dir_path / "threshold_tradeoffs.png"
     plt.savefig(tradeoff_plot_path, dpi=300, bbox_inches="tight")
     plt.close()
     logger.info(f"Saved Threshold Trade-offs plot to '{tradeoff_plot_path}'")
@@ -191,7 +198,7 @@ def evaluate_models() -> None:
     plt.title(f"Model Ensemble Confusion Matrix (Optimal θ = {optimal_th:.4f})")
     plt.xlabel("Predicted Label")
     plt.ylabel("True Label")
-    cm_path = os.path.join(settings.model_dir, "confusion_matrix.png")
+    cm_path = model_dir_path / "confusion_matrix.png"
     plt.savefig(cm_path, dpi=300, bbox_inches="tight")
     plt.close()
     logger.info(f"Saved Confusion Matrix plot to '{cm_path}'")

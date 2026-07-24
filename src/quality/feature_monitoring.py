@@ -1,11 +1,11 @@
-"""
-Evidently AI Feature Data Drift Monitoring Engine.
+"""Evidently AI Feature Data Drift Monitoring Engine.
 
 Compares statistical distribution of current inference/batch features against historical baseline,
 detecting drift and exporting interactive HTML reports.
 """
 
-import os
+from pathlib import Path
+from typing import Any
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -13,39 +13,45 @@ try:
     from evidently.legacy.report import Report
     from evidently.legacy.metric_preset import DataDriftPreset
 except ImportError:
-    from evidently.report import Report
-    from evidently.metric_preset import DataDriftPreset
+    try:
+        from evidently.report import Report
+        from evidently.metric_preset import DataDriftPreset
+    except ImportError:
+        Report = None
+        DataDriftPreset = None
 
 from src.config.settings import settings
 from src.utils.logger import get_logger
 
 load_dotenv()
-logger = get_logger("feature_monitoring")
+logger = get_logger(__name__)
 
-DEFAULT_REPORT_PATH = os.path.join(settings.dashboard_dir, "feature_drift_report.html")
+DEFAULT_REPORT_PATH = Path(settings.dashboard_dir) / "feature_drift_report.html"
 
 
 def generate_feature_drift_report(
     reference_df: pd.DataFrame,
     current_df: pd.DataFrame,
-    report_html_path: str = DEFAULT_REPORT_PATH
-) -> dict:
-    """
-    Generates Data Drift Monitoring Report comparing historical baseline (reference) 
-    with recent batch features (current) using Evidently AI.
-    
-    Saves standalone HTML report to dashboards/feature_drift_report.html.
-    """
+    report_html_path: str | Path = DEFAULT_REPORT_PATH,
+) -> dict[str, Any]:
+    """Generates Data Drift Monitoring Report comparing historical baseline with recent batch features."""
+    if Report is None:
+        logger.warning("[Evidently AI] evidently package is not installed. Skipping drift report generation.")
+        return {"status": "SKIPPED", "reason": "evidently package not installed"}
+
     if reference_df is None or reference_df.empty or current_df is None or current_df.empty:
         logger.warning("[Evidently AI] Reference or Current DataFrame is empty. Skipping drift report generation.")
         return {"status": "SKIPPED", "reason": "Empty input DataFrames"}
 
-    os.makedirs(os.path.dirname(report_html_path), exist_ok=True)
+    path_report = Path(report_html_path)
+    path_report.parent.mkdir(parents=True, exist_ok=True)
     logger.info(f"[Evidently AI] Running Feature Data Drift Analysis on {len(reference_df):,} reference rows vs {len(current_df):,} current rows...")
 
     feature_cols = [
         col for col in current_df.columns
-        if col not in ["card_id", "event_timestamp", "timestamp"] and pd.api.types.is_numeric_dtype(current_df[col])
+        if col in reference_df.columns
+        and col not in ["card_id", "event_timestamp", "timestamp"]
+        and pd.api.types.is_numeric_dtype(current_df[col])
     ]
 
     ref_features = reference_df[feature_cols].dropna()
@@ -58,16 +64,17 @@ def generate_feature_drift_report(
     try:
         report = Report(metrics=[DataDriftPreset()])
         report.run(reference_data=ref_features, current_data=curr_features)
-        
-        report.save_html(report_html_path)
-        logger.info(f"[Evidently AI] Saved HTML Data Drift Report to '{report_html_path}'")
+
+        report.save_html(str(path_report))
+        logger.info(f"[Evidently AI] Saved HTML Data Drift Report to '{path_report}'")
 
         report_dict = report.as_dict()
-        drift_metrics = report_dict.get("metrics", [{}])[0].get("result", {})
-        
-        dataset_drift = drift_metrics.get("dataset_drift", False)
-        drift_share = drift_metrics.get("drift_share", 0.0)
-        number_of_drifted_features = drift_metrics.get("number_of_drifted_columns", 0)
+        metrics_list = report_dict.get("metrics", [{}])
+        drift_metrics = metrics_list[0].get("result", {}) if metrics_list else {}
+
+        dataset_drift = bool(drift_metrics.get("dataset_drift", False))
+        drift_share = float(drift_metrics.get("drift_share", 0.0))
+        number_of_drifted_features = int(drift_metrics.get("number_of_drifted_columns", 0))
 
         if dataset_drift:
             logger.warning(f"[Data Drift Alert] Dataset drift DETECTED! ({number_of_drifted_features} features drifted, share: {drift_share:.2%})")
@@ -79,7 +86,7 @@ def generate_feature_drift_report(
             "dataset_drift": dataset_drift,
             "drift_share": drift_share,
             "drifted_features_count": number_of_drifted_features,
-            "report_html_path": report_html_path
+            "report_html_path": str(path_report),
         }
     except Exception as e:
         logger.error(f"Failed to generate Evidently AI drift report: {e}")

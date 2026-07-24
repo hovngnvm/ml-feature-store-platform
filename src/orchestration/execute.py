@@ -1,12 +1,10 @@
-"""
-Prefect 3 Pipeline Orchestration & Continuous Training Flow.
+"""Prefect 3 Pipeline Orchestration & Continuous Training Flow.
 
 Orchestrates 6-step end-to-end pipeline: Batch execution, Stream DLQ audit,
 Feast materialization, Audit verification, Evidently drift analysis, and Hybrid CT retraining.
 """
 
-import os
-import sys
+from pathlib import Path
 import time
 import argparse
 from datetime import datetime, timezone
@@ -20,7 +18,7 @@ from src.config.settings import settings
 from src.utils.logger import get_logger
 
 load_dotenv()
-logger = get_logger("orchestration_execute")
+logger = get_logger(__name__)
 
 
 @task(name="Batch Lakehouse & DQ Gate Engine", retries=2, retry_delay_seconds=5)
@@ -82,7 +80,7 @@ def task_verification_audit() -> dict:
     """Step 4: Audit checks Redis Online Store, Lakehouse Hive partitions & DLQ Quarantine files."""
     logger.info("[STEP 4/6] Verifying Redis Keys, Lakehouse Partitioning & DLQ Isolation")
     verification_results = {}
-    
+
     # Audit 1: Redis Key Verification
     try:
         r = redis.Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=True)
@@ -98,19 +96,19 @@ def task_verification_audit() -> dict:
 
     # Audit 2: Lakehouse Hive Partition Verification
     partition_found = False
-    if os.path.exists(settings.lakehouse_base_dir):
-        for root, _, files in os.walk(settings.lakehouse_base_dir):
-            for file in files:
-                if file.endswith(".parquet"):
-                    partition_found = True
-                    logger.info(f"  [Audit 2 - Lakehouse Partition] Found partition: {os.path.join(root, file)}")
-                    break
+    lakehouse_dir = Path(settings.lakehouse_base_dir)
+    if lakehouse_dir.exists():
+        parquet_files = list(lakehouse_dir.rglob("*.parquet"))
+        if parquet_files:
+            partition_found = True
+            logger.info(f"  [Audit 2 - Lakehouse Partition] Found partition: {parquet_files[0]}")
     verification_results["lakehouse_hive_partition"] = "PASSED" if partition_found else "FAILED"
 
     # Audit 3: DLQ Quarantined File Verification
-    if os.path.exists(settings.stream_dlq_parquet_path):
-        df_dlq = pd.read_parquet(settings.stream_dlq_parquet_path)
-        logger.info(f"  [Audit 3 - DLQ Isolation Store] Verified {len(df_dlq)} corrupt events quarantined in '{settings.stream_dlq_parquet_path}'")
+    dlq_path = Path(settings.stream_dlq_parquet_path)
+    if dlq_path.exists():
+        df_dlq = pd.read_parquet(dlq_path)
+        logger.info(f"  [Audit 3 - DLQ Isolation Store] Verified {len(df_dlq)} corrupt events quarantined in '{dlq_path}'")
         verification_results["dlq_quarantine_store"] = f"PASSED ({len(df_dlq)} isolated records)"
     else:
         verification_results["dlq_quarantine_store"] = "READY"
@@ -124,13 +122,9 @@ def task_feature_monitoring() -> dict:
     logger.info("[STEP 5/6] Running Evidently AI Feature Monitoring & Data Drift Analysis")
     try:
         from src.quality.feature_monitoring import generate_feature_drift_report
-        parquet_files = []
-        if os.path.exists(settings.lakehouse_base_dir):
-            for root, _, files in os.walk(settings.lakehouse_base_dir):
-                for file in files:
-                    if file.endswith(".parquet"):
-                        parquet_files.append(os.path.join(root, file))
-        
+        lakehouse_dir = Path(settings.lakehouse_base_dir)
+        parquet_files = list(lakehouse_dir.rglob("*.parquet")) if lakehouse_dir.exists() else []
+
         if parquet_files:
             df_current = pd.read_parquet(parquet_files[-1])
             df_reference = df_current.copy()

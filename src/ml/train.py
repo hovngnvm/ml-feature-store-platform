@@ -1,21 +1,18 @@
-"""
-Model Ensemble Training & Evaluation Pipeline with Dynamic Decision Threshold Tuning.
+"""Model Ensemble Training & Evaluation Pipeline with Dynamic Decision Threshold Tuning.
 
 Trains XGBoost and LightGBM models on offline features, optimizes decision thresholds
 based on Financial Cost Matrix (minimizing transaction losses & false positive friction),
 and exports production model artifacts.
 """
 
-from typing import Any
-import os
-import sys
+from pathlib import Path
 import json
+from typing import Any
+from datetime import datetime, timezone
+
 import joblib
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone
-from dotenv import load_dotenv
-
 import xgboost as xgb
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
@@ -31,7 +28,14 @@ from src.config.settings import settings
 from src.utils.logger import get_logger
 from src.ml.ensemble import FraudModelEnsemble
 
-logger = get_logger("train_model")
+logger = get_logger(__name__)
+
+THRESHOLD_START: float = 0.01
+THRESHOLD_END: float = 0.90
+THRESHOLD_STEPS: int = 90
+EPSILON: float = 1e-9
+DEFAULT_TEST_SIZE: float = 0.2
+RANDOM_SEED: int = 42
 
 
 def find_optimal_decision_threshold(
@@ -39,15 +43,8 @@ def find_optimal_decision_threshold(
     y_proba: np.ndarray,
     amounts: np.ndarray | None = None,
     cost_fp: float = settings.default_fp_cost,
-) -> dict:
-    """
-    Finds optimal decision threshold minimizing total financial loss using a Cost Matrix:
-    - False Negative (FN): Lost transaction amount ($A_i$).
-    - False Positive (FP): Verification/friction cost ($cost_fp).
-    - True Positive (TP) & True Negative (TN): $0.
-    
-    Also computes F1-optimal and F2-optimal (Recall-prioritizing) thresholds.
-    """
+) -> dict[str, Any]:
+    """Finds optimal decision threshold minimizing total financial loss using a Cost Matrix."""
     y_true = np.asarray(y_true).astype(int)
     y_proba = np.asarray(y_proba).astype(float)
     if amounts is None:
@@ -55,7 +52,7 @@ def find_optimal_decision_threshold(
     else:
         amounts = np.asarray(amounts).astype(float)
 
-    thresholds = np.linspace(0.01, 0.90, 90)
+    thresholds = np.linspace(THRESHOLD_START, THRESHOLD_END, THRESHOLD_STEPS)
     best_cost_threshold = 0.5
     min_cost = float("inf")
     cost_at_05 = 0.0
@@ -68,7 +65,7 @@ def find_optimal_decision_threshold(
 
     for th in thresholds:
         preds = (y_proba >= th).astype(int)
-        
+
         # FN: Actual fraud missed
         fn_mask = (y_true == 1) & (preds == 0)
         cost_fn = float(amounts[fn_mask].sum())
@@ -91,11 +88,11 @@ def find_optimal_decision_threshold(
         fp = float(fp_mask.sum())
         fn = float(fn_mask.sum())
 
-        precision = tp / (tp + fp + 1e-9)
-        recall = tp / (tp + fn + 1e-9)
+        precision = tp / (tp + fp + EPSILON)
+        recall = tp / (tp + fn + EPSILON)
 
-        f1 = (2 * precision * recall) / (precision + recall + 1e-9)
-        f2 = (5 * precision * recall) / (4 * precision + recall + 1e-9)
+        f1 = (2 * precision * recall) / (precision + recall + EPSILON)
+        f2 = (5 * precision * recall) / (4 * precision + recall + EPSILON)
 
         if f1 > max_f1:
             max_f1 = float(f1)
@@ -109,7 +106,7 @@ def find_optimal_decision_threshold(
         cost_at_05 = min_cost
 
     savings_amount = max(0.0, cost_at_05 - min_cost)
-    savings_pct = (savings_amount / (cost_at_05 + 1e-9)) * 100.0
+    savings_pct = (savings_amount / (cost_at_05 + EPSILON)) * 100.0
 
     logger.info("Optimal Decision Threshold Tuning Results:")
     logger.info(f"   Cost-Optimal Threshold : {best_cost_threshold:.4f} (Min Cost: ${min_cost:,.2f})")
@@ -127,7 +124,7 @@ def find_optimal_decision_threshold(
         "f1_optimal_threshold": round(best_f1_threshold, 4),
         "f2_optimal_threshold": round(best_f2_threshold, 4),
         "best_f1_score": round(max_f1, 4),
-        "best_f2_score": round(max_f2, 4)
+        "best_f2_score": round(max_f2, 4),
     }
 
 
@@ -135,13 +132,13 @@ def evaluate_model_performance(
     name: str,
     y_true: np.ndarray,
     y_proba: np.ndarray,
-    threshold: float = 0.5
-) -> dict:
+    threshold: float = 0.5,
+) -> dict[str, Any]:
     """Calculates PR-AUC, ROC-AUC, F1-Score, and Confusion Matrix at given threshold."""
     precision, recall, _ = precision_recall_curve(y_true, y_proba)
     pr_auc_score = float(auc(recall, precision))
     roc_score = float(roc_auc_score(y_true, y_proba))
-    
+
     y_pred = (y_proba >= threshold).astype(int)
     f1 = float(f1_score(y_true, y_pred, zero_division=0))
     cm = confusion_matrix(y_true, y_pred).tolist()
@@ -157,21 +154,22 @@ def evaluate_model_performance(
         "pr_auc": round(pr_auc_score, 4),
         "roc_auc": round(roc_score, 4),
         "f1_score": round(f1, 4),
-        "confusion_matrix": cm
+        "confusion_matrix": cm,
     }
 
 
 def train_ensemble_pipeline(
-    dataset_path: str = settings.ml_dataset_path,
-    model_output_path: str = settings.model_artifact_path,
-    report_output_path: str = settings.report_json_path
-) -> dict:
+    dataset_path: str | Path = settings.ml_dataset_path,
+    model_output_path: str | Path = settings.model_artifact_path,
+    report_output_path: str | Path = settings.report_json_path,
+) -> dict[str, Any]:
     """Trains XGBoost + LightGBM Model Ensemble, tunes optimal threshold, and exports artifacts."""
-    logger.info(f"Loading ML Training Dataset from '{dataset_path}'...")
-    if not os.path.exists(dataset_path):
+    path_dataset = Path(dataset_path)
+    logger.info(f"Loading ML Training Dataset from '{path_dataset}'...")
+    if not path_dataset.exists():
         raise FileNotFoundError(f"Training dataset not found at: {dataset_path}")
 
-    df = pd.read_parquet(dataset_path)
+    df = pd.read_parquet(path_dataset)
     target_col = "is_fraud"
     feature_cols = [c for c in df.columns if c not in ["card_id", "TransactionID", target_col]]
 
@@ -180,7 +178,7 @@ def train_ensemble_pipeline(
 
     # Stratified Train/Val split
     X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X, y, test_size=DEFAULT_TEST_SIZE, random_state=RANDOM_SEED, stratify=y
     )
 
     logger.info(f"Split Dataset into Train ({len(X_train):,} samples) and Validation ({len(X_val):,} samples)")
@@ -199,8 +197,8 @@ def train_ensemble_pipeline(
         learning_rate=0.05,
         scale_pos_weight=scale_pos_weight,
         eval_metric="aucpr",
-        random_state=42,
-        n_jobs=-1
+        random_state=RANDOM_SEED,
+        n_jobs=-1,
     )
     model_xgb.fit(X_train, y_train)
 
@@ -211,9 +209,9 @@ def train_ensemble_pipeline(
         max_depth=6,
         learning_rate=0.05,
         is_unbalance=True,
-        random_state=42,
+        random_state=RANDOM_SEED,
         verbosity=-1,
-        n_jobs=-1
+        n_jobs=-1,
     )
     model_lgb.fit(X_train, y_train)
 
@@ -228,7 +226,7 @@ def train_ensemble_pipeline(
         y_true=y_val.values,
         y_proba=p_ensemble,
         amounts=val_amounts,
-        cost_fp=settings.default_fp_cost
+        cost_fp=settings.default_fp_cost,
     )
     optimal_th = threshold_tuning["optimal_threshold"]
 
@@ -246,15 +244,16 @@ def train_ensemble_pipeline(
         xgb_weight=0.5,
         lgb_weight=0.5,
         optimal_threshold=optimal_th,
-        threshold_metrics=threshold_tuning
+        threshold_metrics=threshold_tuning,
     )
 
-    os.makedirs(os.path.dirname(model_output_path), exist_ok=True)
-    joblib.dump(ensemble_pipeline, model_output_path)
-    logger.info(f"Saved Ensemble Model Artifact with Optimal Threshold ({optimal_th:.4f}) to '{model_output_path}'")
+    path_model = Path(model_output_path)
+    path_model.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(ensemble_pipeline, path_model)
+    logger.info(f"Saved Ensemble Model Artifact with Optimal Threshold ({optimal_th:.4f}) to '{path_model}'")
 
     # Save Evaluation Report JSON
-    report_dict = {
+    report_dict: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "dataset_size": len(df),
         "train_size": len(X_train),
@@ -268,14 +267,16 @@ def train_ensemble_pipeline(
             "lightgbm": res_lgb,
             "ensemble_default_05": res_ensemble_default,
             "ensemble_optimal": res_ensemble_optimal,
-            "ensemble": res_ensemble_optimal
+            "ensemble": res_ensemble_optimal,
         }
     }
 
-    with open(report_output_path, "w") as f:
+    path_report = Path(report_output_path)
+    path_report.parent.mkdir(parents=True, exist_ok=True)
+    with open(path_report, "w", encoding="utf-8") as f:
         json.dump(report_dict, f, indent=2)
 
-    logger.info(f"Saved Model Evaluation Report JSON to '{report_output_path}'")
+    logger.info(f"Saved Model Evaluation Report JSON to '{path_report}'")
     return report_dict
 
 
