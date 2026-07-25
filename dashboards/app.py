@@ -1,17 +1,15 @@
-import os
-import sys
+from pathlib import Path
 import json
 import time
+from typing import Any
 import joblib
 import pandas as pd
 import numpy as np
 import streamlit as st
-import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import shap
 import redis
-from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,85 +19,71 @@ st.set_page_config(
     page_title="Real-Time Feature Store & Fraud Detection AI Platform",
     page_icon="🛡️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_DIR not in sys.path:
-    sys.path.insert(0, PROJECT_DIR)
-
 from src.config.settings import settings
+from src.ml.ensemble import FraudModelEnsemble
 
-MODEL_PATH = settings.model_artifact_path
-REPORT_JSON_PATH = settings.report_json_path
-DRIFT_HTML_PATH = os.path.join(settings.dashboard_dir, "feature_drift_report.html")
+MODEL_PATH = Path(settings.model_artifact_path)
+REPORT_JSON_PATH = Path(settings.report_json_path)
+DRIFT_HTML_PATH = Path(settings.dashboard_dir) / "feature_drift_report.html"
 REDIS_HOST = settings.redis_host
 REDIS_PORT = settings.redis_port
 
-# Bind FraudModelEnsemble for joblib
-try:
-    from src.ml.train import FraudModelEnsemble
-    sys.modules['__main__'].FraudModelEnsemble = FraudModelEnsemble
-except Exception:
-    pass
-
-from typing import Any
 
 @st.cache_resource
 def load_ensemble_model() -> Any:
     """Loads and caches trained Model Ensemble pipeline."""
-    if os.path.exists(MODEL_PATH):
+    if MODEL_PATH.is_file():
         try:
-            model = joblib.load(MODEL_PATH)
-            return model
+            return joblib.load(MODEL_PATH)
         except Exception as e:
             st.error(f"Error loading model: {e}")
             return None
     return None
 
+
 @st.cache_data
 def load_evaluation_report() -> dict | None:
     """Loads model evaluation metrics JSON."""
-    if os.path.exists(REPORT_JSON_PATH):
+    if REPORT_JSON_PATH.is_file():
         try:
-            with open(REPORT_JSON_PATH, "r") as f:
+            with open(REPORT_JSON_PATH, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return None
     return None
 
 @st.cache_data
-def get_card_historical_features(card_id_str: str) -> dict[str, float]:
-    """Lookup real features from batch_features.parquet or compute card-specific deterministic baseline."""
-    parquet_path = os.path.join(PROJECT_DIR, "data", "batch_features.parquet")
-    if os.path.exists(parquet_path):
+def get_card_historical_features(card_id_str: str) -> tuple[dict[str, float], bool]:
+    """Lookup real features from batch_features.parquet or return cold-start baseline."""
+    parquet_path = Path(settings.batch_parquet_path)
+    if parquet_path.is_file():
         try:
             df = pd.read_parquet(parquet_path)
             matched = df[df["card_id"].astype(str) == str(card_id_str)]
             if not matched.empty:
                 row = matched.iloc[0]
                 return {
-                    "trans_count_7d": float(row.get("trans_count_7d", 2.0)),
-                    "trans_count_30d": float(row.get("trans_count_30d", 8.0)),
+                    "trans_count_7d": float(row.get("trans_count_7d", 1.0)),
+                    "trans_count_30d": float(row.get("trans_count_30d", 5.0)),
                     "avg_amount_30d": float(row.get("avg_amount_30d", 150.0)),
                     "max_amount_30d": float(row.get("max_amount_30d", 500.0)),
                     "distinct_addr_7d": float(row.get("distinct_addr_7d", 1.0)),
-                    "days_since_last_trans": float(row.get("days_since_last_trans", 1.5)),
-                }
+                    "days_since_last_trans": float(row.get("days_since_last_trans", 2.0)),
+                }, True
         except Exception:
             pass
 
-    card_hash = abs(hash(str(card_id_str)))
-    avg_amt = float(30.0 + (card_hash % 500))
-    max_amt = float(avg_amt * (1.5 + (card_hash % 3)))
     return {
-        "trans_count_7d": float(1 + (card_hash % 10)),
-        "trans_count_30d": float(3 + (card_hash % 30)),
-        "avg_amount_30d": avg_amt,
-        "max_amount_30d": max_amt,
-        "distinct_addr_7d": float(1 + (card_hash % 4)),
-        "days_since_last_trans": float(0.5 + (card_hash % 14)),
-    }
+        "trans_count_7d": 1.0,
+        "trans_count_30d": 1.0,
+        "avg_amount_30d": 100.0,
+        "max_amount_30d": 200.0,
+        "distinct_addr_7d": 1.0,
+        "days_since_last_trans": 1.0,
+    }, False
 
 # Custom Glassmorphic Dark Styling
 st.markdown("""
@@ -161,9 +145,11 @@ with tab1:
         card_id = st.text_input("Credit Card ID (card1)", value="11556")
         amount = st.number_input("Transaction Amount ($ USD)", min_value=1.0, max_value=50000.0, value=250.0, step=10.0)
         
-        card_features = get_card_historical_features(card_id)
+        card_features, is_found = get_card_historical_features(card_id)
         
         with st.expander("🔍 Online Historical Features (from Feast/Redis)", expanded=True):
+            if not is_found:
+                st.caption("ℹ️ Card not found in offline store. Using cold-start baseline features.")
             st.json(card_features)
 
         btn_predict = st.button("🚀 Score Transaction (Inference SLA < 5ms)", type="primary", use_container_width=True)
@@ -190,7 +176,9 @@ with tab1:
 
                 xgb_p = float(model_pipeline.xgb_model.predict_proba(input_df)[0, 1])
                 lgb_p = float(model_pipeline.lgb_model.predict_proba(input_df)[0, 1])
-                fraud_score = float(model_pipeline.predict_proba(input_df)[0, 1])
+                w_xgb = getattr(model_pipeline, "xgb_weight", 0.5)
+                w_lgb = getattr(model_pipeline, "lgb_weight", 0.5)
+                fraud_score = float(w_xgb * xgb_p + w_lgb * lgb_p)
                 latency_ms = (time.perf_counter() - start_t) * 1000.0
 
                 decision_th = float(getattr(model_pipeline, "optimal_threshold", 0.5))
@@ -273,20 +261,20 @@ with tab2:
         st.dataframe(df_metrics, use_container_width=True)
 
         # Visualizations from models directory
-        cost_plot_path = os.path.join(PROJECT_DIR, "models", "cost_vs_threshold.png")
-        tradeoff_plot_path = os.path.join(PROJECT_DIR, "models", "threshold_tradeoffs.png")
+        cost_plot_path = Path(settings.model_dir) / "cost_vs_threshold.png"
+        tradeoff_plot_path = Path(settings.model_dir) / "threshold_tradeoffs.png"
 
         c1, c2 = st.columns(2)
-        if os.path.exists(cost_plot_path):
+        if cost_plot_path.is_file():
             with c1:
                 st.markdown("#### 📉 Financial Cost Curve vs Threshold")
-                st.image(cost_plot_path, use_container_width=True)
-        if os.path.exists(tradeoff_plot_path):
+                st.image(str(cost_plot_path), use_container_width=True)
+        if tradeoff_plot_path.is_file():
             with c2:
                 st.markdown("#### 🎯 Metric Trade-offs vs Threshold")
-                st.image(tradeoff_plot_path, use_container_width=True)
+                st.image(str(tradeoff_plot_path), use_container_width=True)
     else:
-        st.warning("⚠️ Evaluation report JSON not found at `models/evaluation_report.json`. Run `python src/ml/train.py` to generate.")
+        st.warning(f"⚠️ Evaluation report JSON not found at `{REPORT_JSON_PATH}`. Run `python src/ml/train.py` to generate.")
 
 # Tab 3: Redis Feature Store Inspector
 with tab3:
@@ -313,7 +301,7 @@ with tab4:
     st.subheader("🛡️ Evidently AI Feature Drift & Quality Report")
     st.write("Embedded interactive Data Drift report generated by Evidently AI engine.")
 
-    if os.path.exists(DRIFT_HTML_PATH):
+    if DRIFT_HTML_PATH.is_file():
         with open(DRIFT_HTML_PATH, "r", encoding="utf-8") as f:
             html_content = f.read()
         st.components.v1.html(html_content, height=800, scrolling=True)

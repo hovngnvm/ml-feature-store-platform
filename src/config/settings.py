@@ -49,6 +49,7 @@ class SystemSettings:
         self.kafka_broker = os.getenv("KAFKA_BROKER", "localhost:19092")
         self.kafka_topic = os.getenv("KAFKA_TOPIC", "raw_transactions")
         self.kafka_dlq_topic = os.getenv("KAFKA_DLQ_TOPIC", "raw_transactions_dlq")
+        self.stream_engine = os.getenv("STREAM_ENGINE", "direct").lower()
 
         self.minio_endpoint = os.getenv("MINIO_ENDPOINT", "localhost:9000").replace("http://", "").replace("https://", "")
         self.minio_access_key = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
