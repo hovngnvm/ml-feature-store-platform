@@ -36,3 +36,35 @@ def test_data_quality_gate() -> None:
     is_valid_inv, clean_inv, error_inv = validate_batch_dataframe(invalid_data)
     assert is_valid_inv is False
     assert error_inv is not None and len(error_inv) > 0
+
+
+def test_data_quality_gate_custom_index() -> None:
+    """Verifies Pandera Schema Gate handles non-default indexes without IndexError."""
+    df_mixed = pd.DataFrame([
+        {
+            "card_id": "card_ok",
+            "trans_count_7d": 5,
+            "trans_count_30d": 20,
+            "avg_amount_30d": 120.0,
+            "max_amount_30d": 400.0,
+            "distinct_addr_7d": 1,
+            "days_since_last_trans": 1.0
+        },
+        {
+            "card_id": "card_bad",
+            "trans_count_7d": -99,
+            "trans_count_30d": 20,
+            "avg_amount_30d": 120.0,
+            "max_amount_30d": 400.0,
+            "distinct_addr_7d": 1,
+            "days_since_last_trans": 1.0
+        }
+    ], index=[100, 200])
+
+    is_valid, clean_df, error_df = validate_batch_dataframe(df_mixed)
+    assert is_valid is False
+    assert len(clean_df) == 1
+    assert len(error_df) == 1
+    assert clean_df.iloc[0]["card_id"] == "card_ok"
+    assert error_df.iloc[0]["card_id"] == "card_bad"
+

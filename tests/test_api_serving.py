@@ -4,8 +4,27 @@ Automated Model Serving API Test Suite.
 Verifies FastAPI health probe, online feature inference endpoints, and error handling.
 """
 
+from unittest.mock import MagicMock
+import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 from src.api.main import app
+
+
+@pytest.fixture
+def mock_ensemble_model(monkeypatch):
+    mock_model = MagicMock()
+    mock_model.feature_names = [
+        "trans_count_7d", "trans_count_30d", "avg_amount_30d", "max_amount_30d",
+        "distinct_addr_7d", "days_since_last_trans", "TransactionAmt",
+        "amount_ratio_30d", "is_amount_gt_30d_max"
+    ]
+    mock_model.xgb_model.predict_proba.return_value = np.array([[0.8, 0.2]])
+    mock_model.lgb_model.predict_proba.return_value = np.array([[0.8, 0.2]])
+    mock_model.predict_proba.return_value = np.array([[0.8, 0.2]])
+    mock_model.optimal_threshold = 0.5
+    monkeypatch.setattr("src.api.main.ensemble_model", mock_model)
+    return mock_model
 
 
 def test_fastapi_health_endpoint() -> None:
@@ -18,22 +37,21 @@ def test_fastapi_health_endpoint() -> None:
         assert "model_loaded" in data
 
 
-def test_fastapi_predict_endpoint() -> None:
-    """Verifies POST /predict returns valid fraud score, decision, and decision_threshold."""
+def test_fastapi_predict_endpoint(mock_ensemble_model) -> None:
+    """Verifies POST /predict returns valid fraud score, decision, and decision_threshold with HTTP 200."""
     with TestClient(app) as client:
         payload = {
             "card_id": "11556",
             "current_amount": 250.0
         }
         response = client.post("/predict", json=payload)
-        if response.status_code == 200:
-            data = response.json()
-            assert "fraud_score" in data
-            assert "decision" in data
-            assert "decision_threshold" in data
-            assert data["decision"] in ["APPROVED", "ALERT: FRAUD DETECTED"]
-            assert "latency_ms" in data
-            assert isinstance(data["fraud_score"], float)
-            assert isinstance(data["decision_threshold"], float)
-        else:
-            assert response.status_code == 503
+        assert response.status_code == 200
+        data = response.json()
+        assert "fraud_score" in data
+        assert "decision" in data
+        assert "decision_threshold" in data
+        assert data["decision"] in ["APPROVED", "ALERT: FRAUD DETECTED"]
+        assert "latency_ms" in data
+        assert isinstance(data["fraud_score"], float)
+        assert isinstance(data["decision_threshold"], float)
+

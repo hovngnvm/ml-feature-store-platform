@@ -20,9 +20,9 @@ def test_system_settings_paths() -> None:
 
 def test_iso_logger_initialization() -> None:
     """Verifies ISO 8601 logger creation and properties."""
-    logger = get_logger("test_feast_logger")
+    logger = get_logger(__name__)
     assert logger is not None
-    assert logger.name == "test_feast_logger"
+    assert logger.name == __name__
     assert logger.propagate is False
 
 
