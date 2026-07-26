@@ -7,7 +7,6 @@ detecting drift and exporting interactive HTML reports.
 from pathlib import Path
 from typing import Any
 import pandas as pd
-from dotenv import load_dotenv
 
 try:
     from evidently.legacy.report import Report
@@ -23,7 +22,6 @@ except ImportError:
 from src.config.settings import settings
 from src.utils.logger import get_logger
 
-load_dotenv()
 logger = get_logger(__name__)
 
 DEFAULT_REPORT_PATH = Path(settings.dashboard_dir) / "feature_drift_report.html"

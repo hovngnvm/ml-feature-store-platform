@@ -56,3 +56,31 @@ def upload_file_to_minio(
     except Exception as e:
         logger.error(f"Failed to upload '{path}' to MinIO: {e}")
         return False
+
+
+def upload_folder_to_minio(
+    local_folder: str | Path,
+    bucket_name: str = settings.minio_bucket,
+    minio_prefix: str = "batch_features",
+) -> int:
+    """Recursively uploads a local directory to MinIO S3 storage, returning the uploaded file count."""
+    folder_path = Path(local_folder)
+    if not folder_path.exists():
+        logger.warning(f"Local folder does not exist for MinIO upload: '{folder_path}'")
+        return 0
+
+    client = get_minio_client()
+    ensure_bucket_exists(client, bucket_name)
+
+    count = 0
+    for parquet_file in folder_path.rglob("*.parquet"):
+        rel_path = parquet_file.relative_to(folder_path).as_posix()
+        s3_object_name = f"{minio_prefix}/{rel_path}" if minio_prefix else rel_path
+        try:
+            client.fput_object(bucket_name, s3_object_name, str(parquet_file))
+            count += 1
+        except Exception as e:
+            logger.error(f"Failed to upload '{parquet_file}' to MinIO: {e}")
+
+    logger.info(f"[Lakehouse Sync] Uploaded {count} partitioned Parquet files -> MinIO S3 's3://{bucket_name}/{minio_prefix}/'")
+    return count

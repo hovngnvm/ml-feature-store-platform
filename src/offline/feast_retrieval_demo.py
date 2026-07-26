@@ -89,7 +89,3 @@ def run_feast_retrieval_demo() -> None:
 
 if __name__ == "__main__":
     run_feast_retrieval_demo()
-
-
-if __name__ == "__main__":
-    run_feast_retrieval_demo()

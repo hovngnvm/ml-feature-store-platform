@@ -9,15 +9,13 @@ import time
 import argparse
 from datetime import datetime, timezone
 import pandas as pd
-import redis
-from dotenv import load_dotenv
 
 from prefect import task, flow
 
 from src.config.settings import settings
 from src.utils.logger import get_logger
+from src.utils.redis_client import get_redis_client
 
-load_dotenv()
 logger = get_logger(__name__)
 
 
@@ -83,7 +81,7 @@ def task_verification_audit() -> dict:
 
     # Audit 1: Redis Key Verification
     try:
-        r = redis.Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=True)
+        r = get_redis_client()
         sample_card_features = r.hgetall("card:11556:stream_features")
         if sample_card_features:
             logger.info(f"  [Audit 1 - Redis Online Store] Verified card:11556:stream_features -> {sample_card_features}")

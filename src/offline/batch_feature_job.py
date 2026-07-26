@@ -8,41 +8,12 @@ from pathlib import Path
 import time
 from datetime import datetime, timezone
 import duckdb
-from dotenv import load_dotenv
 
 from src.config.settings import settings
 from src.utils.logger import get_logger
+from src.utils.minio_client import upload_folder_to_minio
 
-load_dotenv()
 logger = get_logger(__name__)
-
-
-def upload_folder_to_minio(local_folder: str | Path, bucket_name: str, minio_prefix: str = "batch_features") -> None:
-    """Recursively uploads local Hive-partitioned Parquet files to MinIO S3 Lakehouse bucket."""
-    try:
-        from minio import Minio
-        client = Minio(
-            settings.minio_endpoint,
-            access_key=settings.minio_access_key,
-            secret_key=settings.minio_secret_key,
-            secure=settings.minio_secure,
-        )
-
-        if not client.bucket_exists(bucket_name):
-            client.make_bucket(bucket_name)
-
-        folder_path = Path(local_folder)
-        count = 0
-        if folder_path.exists():
-            for parquet_file in folder_path.rglob("*.parquet"):
-                rel_path = parquet_file.relative_to(folder_path).as_posix()
-                s3_object_name = f"{minio_prefix}/{rel_path}"
-                client.fput_object(bucket_name, s3_object_name, str(parquet_file))
-                count += 1
-
-        logger.info(f"[Lakehouse Sync] Uploaded {count} partitioned Parquet files -> MinIO S3 's3://{bucket_name}/{minio_prefix}/'")
-    except Exception as e:
-        logger.warning(f"Failed to sync partitioned Lakehouse to MinIO S3: {e}")
 
 
 def run_batch_feature_pipeline(dataset_path: str | Path = settings.raw_csv_path) -> str:

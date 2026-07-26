@@ -5,12 +5,10 @@ Assembles unified ML Training Dataset by joining historical batch features with 
 
 from pathlib import Path
 import pandas as pd
-from dotenv import load_dotenv
 
 from src.config.settings import settings
 from src.utils.logger import get_logger
 
-load_dotenv()
 logger = get_logger(__name__)
 
 FEATURE_COLUMNS = [

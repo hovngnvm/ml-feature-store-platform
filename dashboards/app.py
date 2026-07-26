@@ -9,10 +9,6 @@ import streamlit as st
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import shap
-import redis
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Page Configuration
 st.set_page_config(
@@ -24,12 +20,11 @@ st.set_page_config(
 
 from src.config.settings import settings
 from src.ml.ensemble import FraudModelEnsemble
+from src.utils.redis_client import get_redis_client
 
 MODEL_PATH = Path(settings.model_artifact_path)
 REPORT_JSON_PATH = Path(settings.report_json_path)
 DRIFT_HTML_PATH = Path(settings.dashboard_dir) / "feature_drift_report.html"
-REDIS_HOST = settings.redis_host
-REDIS_PORT = settings.redis_port
 
 
 @st.cache_resource
@@ -284,7 +279,7 @@ with tab3:
     lookup_card = st.text_input("Enter Card ID to Inspect", value="11556")
     if st.button("🔍 Search Redis Keys"):
         try:
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            r = get_redis_client()
             r.ping()
             key_name = f"card:{lookup_card}:stream_features"
             data_hash = r.hgetall(key_name)

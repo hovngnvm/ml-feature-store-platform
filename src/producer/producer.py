@@ -5,14 +5,14 @@ import random
 import argparse
 from datetime import datetime, timezone
 import pandas as pd
-from dotenv import load_dotenv
 from kafka import KafkaProducer
 
 from src.config.settings import settings
 from src.utils.logger import get_logger
 
-load_dotenv()
 logger = get_logger(__name__)
+
+SECONDS_PER_DAY: int = 86400
 
 
 def create_stream_producer(broker_address: str) -> KafkaProducer:
@@ -32,7 +32,7 @@ def create_stream_producer(broker_address: str) -> KafkaProducer:
         raise ConnectionError(f"Failed to create Stream producer at {broker_address}: {e}")
 
 
-def format_event(row: pd.Series, base_time: float = None, inject_corrupt: bool = False) -> dict:
+def format_event(row: pd.Series, base_time: float | None = None, inject_corrupt: bool = False) -> dict:
     if inject_corrupt:
         corrupt_type = random.choice(["invalid_amount", "invalid_card", "null_card"])
         if corrupt_type == "invalid_amount":

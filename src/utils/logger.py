@@ -16,7 +16,7 @@ DATE_FORMAT: str = "%Y-%m-%dT%H:%M:%S%z"
 
 
 def get_logger(
-    name: str,
+    name: str = __name__,
     level: int | str = logging.INFO,
     log_dir: Path | None = None,
 ) -> logging.Logger:

@@ -55,6 +55,14 @@ class SystemSettings:
         self.minio_access_key = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
         self.minio_secret_key = os.getenv("MINIO_SECRET_KEY", "minioadminpassword")
         self.minio_bucket = os.getenv("MINIO_BUCKET", "feature-store-offline")
+        self.minio_secure = os.getenv("MINIO_SECURE", "false").lower() in ("true", "1", "yes")
+
+        # Application Ports & Service Endpoints
+        self.api_host = os.getenv("FASTAPI_HOST", "0.0.0.0")
+        self.api_port = int(os.getenv("FASTAPI_PORT", 8000))
+        self.streamlit_port = int(os.getenv("STREAMLIT_PORT", 8501))
+        self.log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+        self.metrics_port = int(os.getenv("METRICS_PORT", 9091))
 
         # Fraud Decision & Cost Matrix Parameters
         self.default_fp_cost = float(os.getenv("DEFAULT_FP_COST", 2.0))

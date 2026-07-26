@@ -13,9 +13,7 @@ import json
 import math
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-import redis
 import pandas as pd
-from dotenv import load_dotenv
 
 try:
     import pyflink
@@ -37,8 +35,8 @@ from pathlib import Path
 from typing import Any
 from src.config.settings import settings
 from src.utils.logger import get_logger
+from src.utils.redis_client import get_redis_client
 
-load_dotenv()
 logger = get_logger(__name__)
 
 from prometheus_client import Counter, Histogram, start_http_server
@@ -199,9 +197,7 @@ class DualPathRedisFeatureSink:
     3. DLQ Routing: Catches invalid/corrupt events, pushes to Kafka Topic 'raw_transactions_dlq' and isolates into S3 DLQ Parquet.
     """
     def __init__(self, redis_client=None, dlq_producer=None):
-        self.redis_client = redis_client or redis.Redis(
-            host=settings.redis_host, port=settings.redis_port, decode_responses=True
-        )
+        self.redis_client = redis_client or get_redis_client()
         self.dlq_producer = dlq_producer
         self.windows = defaultdict(deque)
         self.raw_events_buffer = []
