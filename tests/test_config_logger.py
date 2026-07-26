@@ -10,12 +10,42 @@ import pandas as pd
 
 
 def test_system_settings_paths() -> None:
-    """Verifies core system settings paths are properly initialized."""
+    """Verifies core system settings paths and configurations are properly initialized."""
     assert settings.project_dir is not None
     assert settings.data_dir.endswith("data")
     assert settings.model_dir.endswith("models")
     assert settings.redis_port == 6379
     assert settings.default_fp_cost > 0
+    assert isinstance(settings.minio_secure, bool)
+    assert settings.api_port > 0
+    assert settings.api_host is not None
+    assert settings.streamlit_port > 0
+    assert settings.log_level in ("INFO", "DEBUG", "WARNING", "ERROR")
+    assert settings.metrics_port > 0
+
+
+def test_producer_module_constants() -> None:
+    """Verifies SECONDS_PER_DAY constant and format_event helper in producer."""
+    from src.producer.producer import SECONDS_PER_DAY, format_event
+    assert SECONDS_PER_DAY == 86400
+    sample_row = pd.Series({
+        "TransactionID": 1001,
+        "isFraud": 0,
+        "TransactionDT": 100.0,
+        "TransactionAmt": 50.0,
+        "card1": 11556,
+        "ProductCD": "W",
+        "card4": "visa",
+        "card6": "credit",
+        "P_emaildomain": "gmail.com",
+        "addr1": 300.0,
+        "C1": 1.0,
+        "C2": 1.0,
+    })
+    event = format_event(sample_row)
+    assert event["transaction_id"] == 1001
+    assert event["card_id"] == "11556"
+    assert event["amount"] == 50.0
 
 
 def test_iso_logger_initialization() -> None:

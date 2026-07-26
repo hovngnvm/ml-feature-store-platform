@@ -260,8 +260,7 @@ ml-feature-store-platform/
 │   │   └── flink_feature_job.py       # PyFlink job: tumbling/sliding window aggregations & DLQ side output
 │   │
 │   └── utils/                         # Infrastructure Client Utilities
-│       ├── kafka_client.py            # Redpanda/Kafka producer & consumer wrapper
-│       ├── logger.py                  # Standardized color-coded logging utility
+│       ├── logger.py                  # Standardized ISO-8601 logging utility
 │       ├── minio_client.py            # MinIO S3 object storage client & bucket helper
 │       └── redis_client.py            # Redis client wrapper with connection pooling & healthchecks
 │
@@ -276,11 +275,16 @@ ml-feature-store-platform/
 ├── models/                            # Serialized Machine Learning Artifacts
 │   └── ensemble_fraud_model.joblib    # Trained model ensemble binary (XGBoost + LightGBM)
 │
-├── tests/                             # Comprehensive Test Suite (pytest)
-│   ├── test_quality_gate.py           # Pandera Schema Gate & Quarantine tests
+├── tests/                             # Comprehensive Modular Test Suite (pytest)
+│   ├── test_api_serving.py            # FastAPI REST API serving & inference tests
+│   ├── test_config_logger.py          # Settings, ISO Logger & Ensemble verification tests
 │   ├── test_ml_training.py            # Cost Matrix & Decision Threshold tests
-│   └── test_api_serving.py            # FastAPI REST API serving & inference tests
+│   ├── test_quality_gate.py           # Pandera Schema Gate & Quarantine tests
+│   ├── test_serving_latency_benchmark.py # Sub-5ms Warm-Path Serving SLA Latency Benchmark
+│   ├── test_streaming_sink.py         # DualPathRedisFeatureSink & DLQ Isolation tests
+│   └── test_utils_clients.py          # MinIO & Redis Client connection & health tests
 │
+├── conftest.py                        # Root Pytest Configuration & Mock Fixtures
 ├── docker-compose.yml                 # Full stack container configuration (Redpanda, Redis, MinIO, Prometheus, Grafana)
 ├── requirements.txt                   # Dependencies manifest
 └── .env.example                       # Environment variables template
