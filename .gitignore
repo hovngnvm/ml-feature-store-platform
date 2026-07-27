@@ -32,3 +32,5 @@ data/*.parquet
 # Pytest / Logs
 .pytest_cache/
 *.log
+
+docs/
