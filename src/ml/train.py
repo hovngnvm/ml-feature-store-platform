@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 import lightgbm as lgb
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.metrics import (
     precision_recall_curve,
     auc,
@@ -24,7 +24,7 @@ from sklearn.metrics import (
     confusion_matrix
 )
 
-from src.config.settings import settings
+from src.config import settings
 from src.utils.logger import get_logger
 from src.ml.ensemble import FraudModelEnsemble
 
@@ -116,13 +116,14 @@ def find_optimal_decision_threshold(
     logger.info(f"   F2-Optimal Threshold   : {best_f2_threshold:.4f} (Max F2: {max_f2:.4f})")
 
     return {
-        "optimal_threshold": round(best_cost_threshold, 4),
+        "optimal_threshold": round(best_f1_threshold, 4),
+        "cost_optimal_threshold": round(best_cost_threshold, 4),
+        "f1_optimal_threshold": round(best_f1_threshold, 4),
+        "f2_optimal_threshold": round(best_f2_threshold, 4),
         "min_cost": round(min_cost, 2),
         "cost_at_05": round(cost_at_05, 2),
         "savings_amount": round(savings_amount, 2),
         "savings_pct": round(savings_pct, 2),
-        "f1_optimal_threshold": round(best_f1_threshold, 4),
-        "f2_optimal_threshold": round(best_f2_threshold, 4),
         "best_f1_score": round(max_f1, 4),
         "best_f2_score": round(max_f2, 4),
     }
@@ -173,15 +174,31 @@ def train_ensemble_pipeline(
     target_col = "is_fraud"
     feature_cols = [c for c in df.columns if c not in ["card_id", "TransactionID", target_col]]
 
-    X = df[feature_cols]
-    y = df[target_col]
+    # Group-based Card Split to prevent Data Leakage across transactions of the same card
+    if "card_id" in df.columns:
+        gss = GroupShuffleSplit(n_splits=1, test_size=DEFAULT_TEST_SIZE, random_state=RANDOM_SEED)
+        train_idx, val_idx = next(gss.split(df, groups=df["card_id"]))
+        df_train = df.iloc[train_idx]
+        df_val = df.iloc[val_idx]
+        X_train = df_train[feature_cols]
+        y_train = df_train[target_col]
+        X_val = df_val[feature_cols]
+        y_val = df_val[target_col]
+        logger.info(f"GroupSplit on card_id: Train ({len(X_train):,} samples, {df_train['card_id'].nunique():,} cards), Val ({len(X_val):,} samples, {df_val['card_id'].nunique():,} cards)")
+    else:
+        X = df[feature_cols]
+        y = df[target_col]
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=DEFAULT_TEST_SIZE, random_state=RANDOM_SEED, stratify=y
+        )
+        logger.info(f"Split Dataset into Train ({len(X_train):,} samples) and Validation ({len(X_val):,} samples)")
 
-    # Stratified Train/Val split
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=DEFAULT_TEST_SIZE, random_state=RANDOM_SEED, stratify=y
-    )
-
-    logger.info(f"Split Dataset into Train ({len(X_train):,} samples) and Validation ({len(X_val):,} samples)")
+    # Save Reference Baseline Dataset for Evidently AI Data Drift Monitoring
+    baseline_dir = Path(settings.lakehouse_base_dir) / "baseline"
+    baseline_dir.mkdir(parents=True, exist_ok=True)
+    baseline_path = baseline_dir / "reference_baseline.parquet"
+    X_train.head(5000).to_parquet(baseline_path, index=False)
+    logger.info(f"Saved Evidently AI Reference Baseline Dataset to '{baseline_path}'")
 
     # Compute scale_pos_weight for XGBoost to handle imbalanced fraud data
     neg_count = (y_train == 0).sum()

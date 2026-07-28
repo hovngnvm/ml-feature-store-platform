@@ -8,8 +8,9 @@ from pathlib import Path
 import joblib
 import pandas as pd
 import matplotlib.pyplot as plt
+import shap
 
-from src.config.settings import settings
+from src.config import settings
 from src.utils.logger import get_logger
 from src.ml.ensemble import FraudModelEnsemble
 
@@ -23,8 +24,6 @@ def generate_global_shap_explanations(sample_size: int = 2000) -> None:
     path_dataset = Path(settings.ml_dataset_path)
     if not path_model.exists() or not path_dataset.exists():
         raise FileNotFoundError("Model artifact or dataset missing! Run prepare_dataset.py and train.py first.")
-
-    import shap
 
     model_pipeline: FraudModelEnsemble = joblib.load(path_model)
     df = pd.read_parquet(path_dataset)

@@ -18,9 +18,9 @@ from sklearn.metrics import (
     confusion_matrix,
     classification_report
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
-from src.config.settings import settings
+from src.config import settings
 from src.utils.logger import get_logger
 from src.ml.ensemble import FraudModelEnsemble
 from src.ml.train import (
@@ -45,15 +45,21 @@ def evaluate_models() -> None:
 
     model_pipeline: FraudModelEnsemble = joblib.load(path_model)
     df = pd.read_parquet(path_dataset)
-
     feature_cols = model_pipeline.feature_names
-    X = df[feature_cols]
-    y = df["is_fraud"].values
 
-    # Use the exact same Stratified Validation Split as train.py
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=DEFAULT_TEST_SIZE, random_state=RANDOM_SEED, stratify=y
-    )
+    # Use the exact same Group-based Card Split as train.py
+    if "card_id" in df.columns:
+        gss = GroupShuffleSplit(n_splits=1, test_size=DEFAULT_TEST_SIZE, random_state=RANDOM_SEED)
+        train_idx, val_idx = next(gss.split(df, groups=df["card_id"]))
+        df_val = df.iloc[val_idx]
+        X_val = df_val[feature_cols]
+        y_val = df_val["is_fraud"].values
+    else:
+        X = df[feature_cols]
+        y = df["is_fraud"].values
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=DEFAULT_TEST_SIZE, random_state=RANDOM_SEED, stratify=y
+        )
     amounts_val = X_val["TransactionAmt"].values if "TransactionAmt" in X_val.columns else np.ones(len(X_val)) * 100.0
 
     optimal_th = float(getattr(model_pipeline, "optimal_threshold", 0.5))

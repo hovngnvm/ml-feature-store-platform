@@ -6,7 +6,7 @@ Assembles unified ML Training Dataset by joining historical batch features with 
 from pathlib import Path
 import pandas as pd
 
-from src.config.settings import settings
+from src.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
