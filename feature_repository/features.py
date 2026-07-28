@@ -9,11 +9,7 @@ from feast import (
 from feast.on_demand_feature_view import on_demand_feature_view
 from feast.types import Float64, Int64
 import pandas as pd
-
-try:
-    from entities import card_entity
-except ImportError:
-    from feature_repository.entities import card_entity
+from feature_repository.entities import card_entity
 
 BATCH_FEATURE_TTL_DAYS = 365
 STREAM_FEATURE_TTL_DAYS = 7

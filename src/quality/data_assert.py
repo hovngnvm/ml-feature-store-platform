@@ -9,7 +9,7 @@ import pandas as pd
 from pandera.pandas import Column, Check, DataFrameSchema
 from pandera.errors import SchemaErrors
 
-from src.config.settings import settings
+from src.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -50,7 +50,10 @@ BatchFeatureSchema = DataFrameSchema(
 )
 
 
-def validate_batch_dataframe(df: pd.DataFrame) -> tuple[bool, pd.DataFrame, pd.DataFrame | None]:
+def validate_batch_dataframe(
+    df: pd.DataFrame,
+    dlq_path: Path | str | None = None,
+) -> tuple[bool, pd.DataFrame, pd.DataFrame | None]:
     """Validates batch feature DataFrame using Pandera schema and splits valid vs quarantined records."""
     if df.empty:
         logger.error("[DQ Gate] DataFrame is EMPTY! Data Quality assertion failed.")
@@ -73,10 +76,11 @@ def validate_batch_dataframe(df: pd.DataFrame) -> tuple[bool, pd.DataFrame, pd.D
         error_df = df.loc[df.index.isin(invalid_indices)].copy()
         clean_df = df.loc[~df.index.isin(invalid_indices)].copy()
 
-        BATCH_DLQ_PATH.parent.mkdir(parents=True, exist_ok=True)
+        target_dlq = Path(dlq_path) if dlq_path else BATCH_DLQ_PATH
+        target_dlq.parent.mkdir(parents=True, exist_ok=True)
         if not error_df.empty:
-            error_df.to_parquet(BATCH_DLQ_PATH, index=False)
-            logger.warning(f"[DLQ Isolation] Quarantined {len(error_df)} invalid records to '{BATCH_DLQ_PATH}'")
+            error_df.to_parquet(target_dlq, index=False)
+            logger.warning(f"[DLQ Isolation] Quarantined {len(error_df)} invalid records to '{target_dlq}'")
 
         return False, clean_df, error_df
 

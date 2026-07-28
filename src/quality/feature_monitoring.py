@@ -7,19 +7,10 @@ detecting drift and exporting interactive HTML reports.
 from pathlib import Path
 from typing import Any
 import pandas as pd
+from evidently.legacy.report import Report
+from evidently.legacy.metric_preset import DataDriftPreset
 
-try:
-    from evidently.legacy.report import Report
-    from evidently.legacy.metric_preset import DataDriftPreset
-except ImportError:
-    try:
-        from evidently.report import Report
-        from evidently.metric_preset import DataDriftPreset
-    except ImportError:
-        Report = None
-        DataDriftPreset = None
-
-from src.config.settings import settings
+from src.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,10 +24,6 @@ def generate_feature_drift_report(
     report_html_path: str | Path = DEFAULT_REPORT_PATH,
 ) -> dict[str, Any]:
     """Generates Data Drift Monitoring Report comparing historical baseline with recent batch features."""
-    if Report is None:
-        logger.warning("[Evidently AI] evidently package is not installed. Skipping drift report generation.")
-        return {"status": "SKIPPED", "reason": "evidently package not installed"}
-
     if reference_df is None or reference_df.empty or current_df is None or current_df.empty:
         logger.warning("[Evidently AI] Reference or Current DataFrame is empty. Skipping drift report generation.")
         return {"status": "SKIPPED", "reason": "Empty input DataFrames"}
