@@ -11,10 +11,15 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from prefect import task, flow
+from feast import FeatureStore
 
-from src.config.settings import settings
+from src.config import settings
 from src.utils.logger import get_logger
 from src.utils.redis_client import get_redis_client
+from src.offline.batch_feature_job import run_batch_feature_pipeline
+from src.streaming.flink_feature_job import DualPathRedisFeatureSink
+from src.quality.feature_monitoring import generate_feature_drift_report
+from src.ml.train import train_ensemble_pipeline
 
 logger = get_logger(__name__)
 
@@ -23,7 +28,6 @@ logger = get_logger(__name__)
 def task_batch_lakehouse() -> dict:
     """Step 1: Executes DuckDB Batch Feature Pipeline & Pandera DQ Assertions Gate."""
     logger.info("[STEP 1/6] Running Batch Feature Job & Data Quality Gate (Pandera)")
-    from src.offline.batch_feature_job import run_batch_feature_pipeline
     partition_file = run_batch_feature_pipeline()
     logger.info(f"Step 1 PASSED: Generated Partitioned Parquet Lakehouse at '{partition_file}'")
     return {"status": "SUCCESS", "partition_file": partition_file}
@@ -33,7 +37,6 @@ def task_batch_lakehouse() -> dict:
 def task_stream_dlq() -> dict:
     """Step 2: Simulates PyFlink Stream Processing & DLQ Side Output Isolation."""
     logger.info("[STEP 2/6] Executing Stream Feature Engine & DLQ Isolation")
-    from src.streaming.flink_feature_job import DualPathRedisFeatureSink
     sink = DualPathRedisFeatureSink()
 
     test_stream_events = [
@@ -64,7 +67,6 @@ def task_stream_dlq() -> dict:
 def task_feast_materialize() -> dict:
     """Step 3: Materializes latest batch features from Parquet into Redis Online Store via Feast SDK."""
     logger.info("[STEP 3/6] Triggering Feast Materialization into Redis")
-    from feast import FeatureStore
     store = FeatureStore(repo_path=settings.feature_repo_dir)
     start_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
     end_date = datetime.now(timezone.utc)
@@ -119,16 +121,33 @@ def task_feature_monitoring() -> dict:
     """Step 5: Runs Data Drift Detection using Evidently AI and generates HTML Dashboard report."""
     logger.info("[STEP 5/6] Running Evidently AI Feature Monitoring & Data Drift Analysis")
     try:
-        from src.quality.feature_monitoring import generate_feature_drift_report
         lakehouse_dir = Path(settings.lakehouse_base_dir)
-        parquet_files = list(lakehouse_dir.rglob("*.parquet")) if lakehouse_dir.exists() else []
+        baseline_path = lakehouse_dir / "baseline" / "reference_baseline.parquet"
 
-        if parquet_files:
-            df_current = pd.read_parquet(parquet_files[-1])
-            df_reference = df_current.copy()
+        # Load reference baseline dataset
+        if baseline_path.exists():
+            df_reference = pd.read_parquet(baseline_path)
+        elif Path(settings.batch_parquet_path).exists():
+            df_reference = pd.read_parquet(settings.batch_parquet_path).head(5000)
+        else:
+            df_reference = None
+
+        # Find recent current batch feature partitions (sorted by modification time)
+        batch_dir = lakehouse_dir / "batch_features"
+        batch_files = sorted(
+            [p for p in batch_dir.rglob("*.parquet") if "baseline" not in str(p)],
+            key=lambda p: p.stat().st_mtime
+        ) if batch_dir.exists() else []
+
+        if batch_files and df_reference is not None:
+            df_current = pd.read_parquet(batch_files[-1])
             res = generate_feature_drift_report(df_reference, df_current)
             return res
-        return {"status": "SKIPPED", "reason": "No Lakehouse parquet files found"}
+        elif Path(settings.batch_parquet_path).exists() and df_reference is not None:
+            df_current = pd.read_parquet(settings.batch_parquet_path)
+            res = generate_feature_drift_report(df_reference, df_current)
+            return res
+        return {"status": "SKIPPED", "reason": "Missing Lakehouse baseline or current batch feature parquet files"}
     except Exception as e:
         logger.warning(f"Could not run Evidently AI Feature Monitoring: {e}")
         return {"status": "SKIPPED", "error": str(e)}
@@ -139,7 +158,6 @@ def task_model_training(trigger_reason: str = "SCHEDULED_WEEKLY_CRON") -> dict:
     """Step 6: Trains or Retrains Model Ensemble (XGBoost + LightGBM Blending)."""
     logger.info(f"[STEP 6/6] Executing Model Ensemble Training (CT Trigger Reason: '{trigger_reason}')")
     try:
-        from src.ml.train import train_ensemble_pipeline
         report = train_ensemble_pipeline()
         logger.info(f"Step 6 PASSED: Model Ensemble Trained via '{trigger_reason}' (PR-AUC: {report['metrics']['ensemble']['pr_auc']}, ROC-AUC: {report['metrics']['ensemble']['roc_auc']})")
         return {"status": "SUCCESS", "report": report, "trigger_reason": trigger_reason}

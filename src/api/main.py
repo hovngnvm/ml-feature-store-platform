@@ -15,8 +15,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
+from feast import FeatureStore
 
-from src.config.settings import settings
+from src.config import settings
 from src.utils.logger import get_logger
 from src.ml.ensemble import FraudModelEnsemble
 from src.utils.redis_client import get_redis_client, check_redis_health
@@ -37,7 +38,7 @@ async def lifespan(app: FastAPI):
     global ensemble_model, feast_store, redis_client
     logger.info("Initializing Model Serving API Resources...")
 
-    if Path(settings.model_artifact_path).exists():
+    if ensemble_model is None and Path(settings.model_artifact_path).exists():
         try:
             ensemble_model = joblib.load(settings.model_artifact_path)
             th = getattr(ensemble_model, "optimal_threshold", 0.5)
@@ -49,7 +50,6 @@ async def lifespan(app: FastAPI):
 
     if Path(settings.feature_repo_dir).exists():
         try:
-            from feast import FeatureStore
             feast_store = FeatureStore(repo_path=settings.feature_repo_dir)
             logger.info(f"Feast FeatureStore initialized from '{settings.feature_repo_dir}'")
         except Exception as e:
@@ -106,11 +106,13 @@ def root() -> dict[str, str]:
 def health_check() -> dict[str, Any]:
     """Healthcheck endpoint verifying model & infrastructure readiness."""
     model_loaded = ensemble_model is not None
-    redis_ok = check_redis_health(redis_client) if redis_client else False
+    redis_ok = check_redis_health(redis_client) if redis_client is not None else False
     decision_th = getattr(ensemble_model, "optimal_threshold", 0.5) if ensemble_model else None
 
+    is_healthy = model_loaded and (redis_ok or redis_client is None)
+
     return {
-        "status": "HEALTHY" if model_loaded else "DEGRADED",
+        "status": "HEALTHY" if is_healthy else "DEGRADED",
         "model_loaded": model_loaded,
         "optimal_decision_threshold": decision_th,
         "redis_connected": redis_ok,
@@ -118,9 +120,26 @@ def health_check() -> dict[str, Any]:
     }
 
 
+@app.get("/ready", tags=["Health"])
+def readiness_check() -> dict[str, str]:
+    """Kubernetes/Container Readiness probe ensuring model and stores are operational."""
+    if ensemble_model is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Model is not ready/loaded."
+        )
+    redis_ok = check_redis_health(redis_client) if redis_client is not None else True
+    if not redis_ok:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Redis online feature store is unreachable."
+        )
+    return {"status": "READY"}
+
+
 @app.post("/predict", response_model=PredictionResponse, tags=["Prediction"])
 def predict_fraud(req: TransactionRequest) -> PredictionResponse:
-    """Sub-5ms Inference Endpoint with Dynamic Decision Threshold."""
+    """Sub-50ms Inference Endpoint with Dynamic Decision Threshold."""
     start_time = time.perf_counter()
 
     if ensemble_model is None:
@@ -131,19 +150,20 @@ def predict_fraud(req: TransactionRequest) -> PredictionResponse:
 
     card_id = str(req.card_id)
     curr_amount = float(req.current_amount)
+    is_cold_start = True
 
-    # Retrieve Online Features
+    # Baseline Cold-Start Features (Safe Defaults for unseen cards)
     online_features: dict[str, float] = {
         "trans_count_7d": 1.0,
-        "trans_count_30d": 5.0,
-        "avg_amount_30d": 150.0,
-        "max_amount_30d": 500.0,
+        "trans_count_30d": 1.0,
+        "avg_amount_30d": curr_amount,
+        "max_amount_30d": curr_amount,
         "distinct_addr_7d": 1.0,
-        "days_since_last_trans": 2.0,
+        "days_since_last_trans": 0.0,
         "TransactionAmt": curr_amount,
     }
 
-    # Try Feast online lookup
+    # Retrieve Online Features via Feast Online Store
     if feast_store:
         try:
             res_dict = feast_store.get_online_features(
@@ -158,16 +178,25 @@ def predict_fraud(req: TransactionRequest) -> PredictionResponse:
                 entity_rows=[{"card_id": card_id}]
             ).to_dict()
 
+            expected_numeric_features = set(ensemble_model.feature_names)
+            found_any = False
             for key, val_list in res_dict.items():
                 col_name = key.split(":")[-1]
-                if val_list and val_list[0] is not None and not np.isnan(val_list[0]):
-                    online_features[col_name] = float(val_list[0])
+                if col_name in expected_numeric_features and val_list and val_list[0] is not None and not np.isnan(val_list[0]):
+                    try:
+                        online_features[col_name] = float(val_list[0])
+                        found_any = True
+                    except (ValueError, TypeError):
+                        pass
+            if found_any:
+                is_cold_start = False
         except Exception as e:
-            logger.debug(f"Feast online lookup notice for card '{card_id}': {e}")
+            logger.warning(f"Feast online feature lookup error for card '{card_id}': {e}")
+            pass
 
     # Compute Derived Features
-    avg_30d = online_features.get("avg_amount_30d", 150.0)
-    max_30d = online_features.get("max_amount_30d", 500.0)
+    avg_30d = online_features.get("avg_amount_30d", curr_amount)
+    max_30d = online_features.get("max_amount_30d", curr_amount)
 
     online_features["amount_ratio_30d"] = curr_amount / (avg_30d + 1.0)
     online_features["is_amount_gt_30d_max"] = 1.0 if curr_amount > max_30d else 0.0
@@ -189,7 +218,7 @@ def predict_fraud(req: TransactionRequest) -> PredictionResponse:
 
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
-    logger.info(f"Predict Card '{card_id}' (${curr_amount:.2f}) -> {decision} (Score: {fraud_score:.4f}, Threshold: {decision_th:.4f}, Latency: {elapsed_ms:.2f}ms)")
+    logger.info(f"Predict Card '{card_id}' (${curr_amount:.2f}) -> {decision} (Score: {fraud_score:.4f}, Threshold: {decision_th:.4f}, Latency: {elapsed_ms:.2f}ms, ColdStart: {is_cold_start})")
 
     return PredictionResponse(
         card_id=card_id,

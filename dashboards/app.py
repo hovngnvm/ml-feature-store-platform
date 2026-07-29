@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from src.config.settings import settings
+from src.config import settings
 from src.ml.ensemble import FraudModelEnsemble
 from src.utils.redis_client import get_redis_client
 
