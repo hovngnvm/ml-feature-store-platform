@@ -9,9 +9,10 @@ import time
 from datetime import datetime, timezone
 import duckdb
 
-from src.config.settings import settings
+from src.config import settings
 from src.utils.logger import get_logger
 from src.utils.minio_client import upload_folder_to_minio
+from src.quality.data_assert import validate_batch_dataframe
 
 logger = get_logger(__name__)
 
@@ -74,7 +75,6 @@ def run_batch_feature_pipeline(dataset_path: str | Path = settings.raw_csv_path)
     logger.info(f"Computed batch features for {len(batch_features_df):,} unique cards.")
 
     try:
-        from src.quality.data_assert import validate_batch_dataframe
         is_valid, clean_df, error_df = validate_batch_dataframe(batch_features_df)
         if not is_valid:
             if clean_df is not None and not clean_df.empty:

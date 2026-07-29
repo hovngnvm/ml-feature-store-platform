@@ -6,8 +6,9 @@ Verifies point-in-time offline feature retrieval and online feature vector looku
 from pathlib import Path
 from datetime import datetime, timezone
 import pandas as pd
+from feast import FeatureStore
 
-from src.config.settings import settings
+from src.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -15,8 +16,6 @@ logger = get_logger(__name__)
 
 def run_feast_retrieval_demo() -> None:
     """Executes Feast FeatureStore validation pipeline."""
-    from feast import FeatureStore
-
     logger.info(f"Initializing Feast FeatureStore from repository: {settings.feature_repo_dir}")
     store = FeatureStore(repo_path=settings.feature_repo_dir)
 

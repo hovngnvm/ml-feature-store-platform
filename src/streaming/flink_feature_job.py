@@ -11,35 +11,22 @@ import sys
 import time
 import json
 import math
+import uuid
+import argparse
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-import pandas as pd
-
-try:
-    import pyflink
-    from pyflink.table import (
-        StreamTableEnvironment,
-        EnvironmentSettings,
-        Table
-    )
-    from pyflink.table.expressions import col
-    from pyflink.datastream import StreamExecutionEnvironment
-except (ImportError, ModuleNotFoundError):
-    StreamTableEnvironment = None  # type: ignore
-    EnvironmentSettings = None  # type: ignore
-    Table = None  # type: ignore
-    col = None  # type: ignore
-    StreamExecutionEnvironment = None  # type: ignore
-
 from pathlib import Path
 from typing import Any
-from src.config.settings import settings
+import pandas as pd
+from kafka import KafkaConsumer, KafkaProducer
+from prometheus_client import Counter, Histogram, start_http_server
+
+from src.config import settings
 from src.utils.logger import get_logger
 from src.utils.redis_client import get_redis_client
+from src.utils.minio_client import upload_file_to_minio
 
 logger = get_logger(__name__)
-
-from prometheus_client import Counter, Histogram, start_http_server
 
 EVENTS_PROCESSED = Counter('stream_events_processed_total', 'Total valid stream events processed')
 EVENTS_CORRUPT_DLQ = Counter('stream_events_dlq_total', 'Total corrupt events sent to DLQ side output')
@@ -57,7 +44,7 @@ def init_metrics_exporter(port: int = 9091) -> bool:
         return False
 
 
-def register_kafka_source(t_env: StreamTableEnvironment) -> None:
+def register_kafka_source(t_env: Any) -> None:
     """Registers Kafka Source Table using Flink SQL DDL with 5s Event-Time Watermarking."""
     kafka_source_ddl = f"""
         CREATE TABLE raw_transactions_kafka (
@@ -89,12 +76,18 @@ def register_kafka_source(t_env: StreamTableEnvironment) -> None:
     logger.info("Registered Kafka source table with 5s Watermark.")
 
 
-def transform_stream(t_env: StreamTableEnvironment) -> Table:
+def transform_stream(t_env: Any) -> Any:
     """
     Applies Data Quality (DQ) Gateways, Business Rule Assertions, 
     and Schema Normalization using PyFlink Table API.
     """
-    transactions: Table = t_env.from_path("raw_transactions_kafka")
+    try:
+        from pyflink.table.expressions import col
+    except (ImportError, ModuleNotFoundError):
+        logger.error("pyflink.table.expressions.col is not available.")
+        return None
+
+    transactions = t_env.from_path("raw_transactions_kafka")
 
     valid_transactions = transactions.filter(
         (col("card_id").is_not_null) &
@@ -117,13 +110,17 @@ def transform_stream(t_env: StreamTableEnvironment) -> Table:
         col("timestamp"),
         col("event_time")
     )
-    logger.info("Applied Data Quality Gateways & Business Rule Assertions in PyFlink Table API.")
+    t_env.create_temporary_view("valid_transactions_stream", sanitized_table)
+    logger.info("Applied Data Quality Gateways & registered 'valid_transactions_stream' in PyFlink Table API.")
     return sanitized_table
 
 
 def setup_flink_environment() -> tuple[Any, Any]:
     """Initializes PyFlink StreamTableEnvironment and loads Kafka SQL connector JAR."""
-    if StreamExecutionEnvironment is None or StreamTableEnvironment is None:
+    try:
+        from pyflink.datastream import StreamExecutionEnvironment
+        from pyflink.table import StreamTableEnvironment, EnvironmentSettings
+    except (ImportError, ModuleNotFoundError):
         logger.warning("PyFlink is not installed or available in this Python environment.")
         return None, None
 
@@ -147,7 +144,7 @@ def setup_flink_environment() -> tuple[Any, Any]:
         return None, None
 
 
-def register_feature_sink_and_execute(t_env: StreamTableEnvironment) -> None:
+def register_feature_sink_and_execute(t_env: Any) -> None:
     """Defines feature sink and submits streaming sliding window aggregation job on Flink."""
     sink_ddl = """
         CREATE TABLE IF NOT EXISTS card_stream_features_sink (
@@ -176,7 +173,7 @@ def register_feature_sink_and_execute(t_env: StreamTableEnvironment) -> None:
             SUM(amount) AS total_amount_1h,
             AVG(amount) AS avg_amount_1h,
             SUM(c2) AS c2_count_sum_1h
-        FROM raw_transactions_kafka
+        FROM valid_transactions_stream
         GROUP BY card_id, HOP(event_time, INTERVAL '1' MINUTE, INTERVAL '1' HOUR);
     """
     logger.info("Submitting Flink SQL Hopping Window Job to Execution Engine...")
@@ -185,7 +182,6 @@ def register_feature_sink_and_execute(t_env: StreamTableEnvironment) -> None:
 
 def upload_to_minio(file_path: str | Path, object_name: str) -> bool:
     """Uploads Parquet archive file to MinIO S3 Cold Path / DLQ Bucket using centralized client."""
-    from src.utils.minio_client import upload_file_to_minio
     return upload_file_to_minio(file_path, object_name, bucket_name=settings.minio_bucket)
 
 
@@ -327,41 +323,65 @@ class DualPathRedisFeatureSink:
         return feature_vector
 
     def flush_cold_path_archive(self) -> bool:
-        """Flushes buffered raw events to Parquet Data Lake & MinIO S3 Storage."""
+        """Flushes buffered raw events and DLQ to Partitioned Parquet Lakehouse & MinIO S3 Storage."""
+        now_dt = datetime.now(timezone.utc)
         success = True
+
         if self.raw_events_buffer:
             try:
-                raw_path = Path(settings.raw_events_parquet_path)
-                raw_path.parent.mkdir(parents=True, exist_ok=True)
-                df_new = pd.DataFrame(self.raw_events_buffer)
-                if raw_path.exists():
-                    try:
-                        df_existing = pd.read_parquet(raw_path)
-                        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-                    except Exception:
-                        df_combined = df_new
-                else:
-                    df_combined = df_new
+                batch_id = uuid.uuid4().hex[:8]
+                date_part = f"year={now_dt.year}/month={now_dt.month:02d}/day={now_dt.day:02d}"
+                raw_dir = Path(settings.lakehouse_base_dir) / "raw_events" / date_part
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                raw_filename = f"events_{now_dt.strftime('%Y%m%d_%H%M%S')}_{batch_id}.parquet"
+                raw_path = raw_dir / raw_filename
 
-                df_combined.to_parquet(raw_path, index=False)
-                logger.info(f"[Cold Path Archival] Saved {len(df_combined):,} raw events to '{raw_path}'")
-                upload_to_minio(raw_path, "raw_events/stream_events.parquet")
-                self.raw_events_buffer.clear()
+                df_new = pd.DataFrame(self.raw_events_buffer)
+                df_new.to_parquet(raw_path, index=False)
+
+                # Also update latest consolidated snapshot if configured
+                base_raw_path = Path(settings.raw_events_parquet_path)
+                base_raw_path.parent.mkdir(parents=True, exist_ok=True)
+                df_new.to_parquet(base_raw_path, index=False)
+
+                logger.info(f"[Cold Path Archival] Saved {len(df_new):,} raw events to '{raw_path}'")
+                minio_key = f"raw_events/{date_part}/{raw_filename}"
+                uploaded = upload_to_minio(raw_path, minio_key)
+                if uploaded:
+                    self.raw_events_buffer.clear()
+                else:
+                    logger.warning("[Cold Path Archival] MinIO upload failed; clearing buffer to prevent unbounded RAM growth after disk save.")
+                    self.raw_events_buffer.clear()
+                    success = False
             except Exception as e:
                 logger.error(f"[Cold Path Archival Error] Failed to persist raw stream: {e}")
                 success = False
 
         if self.dlq_events_buffer:
             try:
-                dlq_path = Path(settings.stream_dlq_parquet_path)
-                dlq_path.parent.mkdir(parents=True, exist_ok=True)
+                batch_id = uuid.uuid4().hex[:8]
+                date_part = f"year={now_dt.year}/month={now_dt.month:02d}/day={now_dt.day:02d}"
+                dlq_dir = Path(settings.lakehouse_base_dir) / "dlq" / date_part
+                dlq_dir.mkdir(parents=True, exist_ok=True)
+                dlq_filename = f"dlq_{now_dt.strftime('%Y%m%d_%H%M%S')}_{batch_id}.parquet"
+                dlq_path = dlq_dir / dlq_filename
+
                 df_dlq = pd.DataFrame(self.dlq_events_buffer)
                 df_dlq.to_parquet(dlq_path, index=False)
-                now_dt = datetime.now(timezone.utc)
-                minio_dlq_key = f"dlq/year={now_dt.year}/month={now_dt.month:02d}/stream_errors.parquet"
+
+                base_dlq_path = Path(settings.stream_dlq_parquet_path)
+                base_dlq_path.parent.mkdir(parents=True, exist_ok=True)
+                df_dlq.to_parquet(base_dlq_path, index=False)
+
                 logger.info(f"[DLQ Archival] Saved {len(df_dlq)} quarantined events to '{dlq_path}'")
-                upload_to_minio(dlq_path, minio_dlq_key)
-                self.dlq_events_buffer.clear()
+                minio_dlq_key = f"dlq/{date_part}/{dlq_filename}"
+                uploaded = upload_to_minio(dlq_path, minio_dlq_key)
+                if uploaded:
+                    self.dlq_events_buffer.clear()
+                else:
+                    logger.warning("[DLQ Archival] MinIO DLQ upload failed; clearing buffer to prevent unbounded RAM growth after disk save.")
+                    self.dlq_events_buffer.clear()
+                    success = False
             except Exception as e:
                 logger.error(f"[DLQ Archival Error] Failed to persist DLQ stream: {e}")
                 success = False
@@ -370,7 +390,6 @@ class DualPathRedisFeatureSink:
 
 
 def main() -> None:
-    import argparse
     parser = argparse.ArgumentParser(description="Real-Time Feature Streaming Engine")
     parser.add_argument("--engine", type=str, choices=["direct", "flink"], default=settings.stream_engine, help="Execution engine mode")
     args = parser.parse_args()
@@ -389,8 +408,6 @@ def main() -> None:
         return
 
     # Direct Python Stream Processor
-    from kafka import KafkaConsumer, KafkaProducer
-
     dlq_producer = None
     try:
         dlq_producer = KafkaProducer(
