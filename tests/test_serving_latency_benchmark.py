@@ -15,7 +15,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from src.config.settings import settings
+from src.config import settings
 from src.ml.ensemble import FraudModelEnsemble
 
 

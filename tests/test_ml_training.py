@@ -4,8 +4,11 @@ Automated Machine Learning Algorithm Test Suite.
 Verifies Cost Matrix optimization logic, Dynamic Decision Threshold Tuning, and financial fraud savings.
 """
 
+from pathlib import Path
 import numpy as np
+from src.config import settings
 from src.ml.train import find_optimal_decision_threshold
+from src.ml.evaluate import evaluate_models
 from src.ml.ensemble import FraudModelEnsemble
 
 
@@ -33,3 +36,19 @@ def test_optimal_threshold_tuning() -> None:
     assert res["savings_amount"] >= 0.0
     assert "f1_optimal_threshold" in res
     assert "f2_optimal_threshold" in res
+
+
+import pytest
+
+
+def test_evaluate_models_execution() -> None:
+    """Verifies offline model evaluation pipeline runs without errors."""
+    if not Path(settings.model_artifact_path).exists() or not Path(settings.ml_dataset_path).exists():
+        pytest.skip(f"Model artifact ({settings.model_artifact_path}) or dataset ({settings.ml_dataset_path}) missing; skipping offline evaluation test.")
+
+    evaluate_models()
+    assert (Path(settings.model_dir) / "roc_curve.png").exists()
+    assert (Path(settings.model_dir) / "pr_curve.png").exists()
+    assert (Path(settings.model_dir) / "cost_vs_threshold.png").exists()
+    assert (Path(settings.model_dir) / "threshold_tradeoffs.png").exists()
+    assert (Path(settings.model_dir) / "confusion_matrix.png").exists()

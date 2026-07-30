@@ -27,6 +27,15 @@ def mock_ensemble_model(monkeypatch):
     return mock_model
 
 
+@pytest.fixture
+def mock_redis_healthy(monkeypatch):
+    mock_redis = MagicMock()
+    mock_redis.ping.return_value = True
+    monkeypatch.setattr("src.api.main.redis_client", mock_redis)
+    monkeypatch.setattr("src.api.main.check_redis_health", lambda client: True)
+    return mock_redis
+
+
 def test_fastapi_health_endpoint() -> None:
     """Verifies GET /health returns HTTP 200 status."""
     with TestClient(app) as client:
@@ -35,6 +44,25 @@ def test_fastapi_health_endpoint() -> None:
         data = response.json()
         assert data["status"].upper() in ["HEALTHY", "DEGRADED"]
         assert "model_loaded" in data
+
+
+def test_fastapi_readiness_endpoint_ready(mock_ensemble_model, mock_redis_healthy) -> None:
+    """Verifies GET /ready returns HTTP 200 when both model and redis are ready."""
+    with TestClient(app) as client:
+        response = client.get("/ready")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "READY"
+
+
+def test_fastapi_readiness_endpoint_redis_unreachable(mock_ensemble_model, monkeypatch) -> None:
+    """Verifies GET /ready returns HTTP 503 when redis store is unreachable."""
+    mock_redis = MagicMock()
+    monkeypatch.setattr("src.api.main.redis_client", mock_redis)
+    monkeypatch.setattr("src.api.main.check_redis_health", lambda client: False)
+    with TestClient(app) as client:
+        response = client.get("/ready")
+        assert response.status_code == 503
 
 
 def test_fastapi_predict_endpoint(mock_ensemble_model) -> None:

@@ -1,7 +1,7 @@
 """Automated Test Suite for MinIO S3 and Redis Shared Utilities."""
 
 from unittest.mock import MagicMock
-from src.utils.minio_client import ensure_bucket_exists
+from src.utils.minio_client import ensure_bucket_exists, upload_folder_to_minio
 from src.utils.redis_client import check_redis_health
 
 
@@ -31,7 +31,6 @@ def test_redis_client_healthcheck_fallback() -> None:
 
 def test_upload_folder_to_minio_empty_or_missing(tmp_path) -> None:
     """Verifies upload_folder_to_minio handles missing/empty directory safely."""
-    from src.utils.minio_client import upload_folder_to_minio
     missing_dir = tmp_path / "non_existent_folder"
     count = upload_folder_to_minio(missing_dir, bucket_name="test-bucket")
     assert count == 0

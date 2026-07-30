@@ -2,11 +2,13 @@
 Unit test suite for Centralized Settings, Logger, and Ensemble utilities.
 """
 
-from src.config.settings import settings
-from src.utils.logger import get_logger
-from src.ml.ensemble import FraudModelEnsemble
 import numpy as np
 import pandas as pd
+
+from src.config import settings, get_settings, SystemSettings
+from src.utils.logger import get_logger
+from src.ml.ensemble import FraudModelEnsemble
+from src.producer.producer import SECONDS_PER_DAY, format_event
 
 
 def test_system_settings_paths() -> None:
@@ -23,10 +25,15 @@ def test_system_settings_paths() -> None:
     assert settings.log_level in ("INFO", "DEBUG", "WARNING", "ERROR")
     assert settings.metrics_port > 0
 
+    s1 = get_settings()
+    s2 = get_settings()
+    assert isinstance(s1, SystemSettings)
+    assert s1 is s2
+    assert s1 is settings
+
 
 def test_producer_module_constants() -> None:
     """Verifies SECONDS_PER_DAY constant and format_event helper in producer."""
-    from src.producer.producer import SECONDS_PER_DAY, format_event
     assert SECONDS_PER_DAY == 86400
     sample_row = pd.Series({
         "TransactionID": 1001,

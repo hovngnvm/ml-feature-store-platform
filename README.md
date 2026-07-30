@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-An enterprise-grade **Real-Time Machine Learning Feature Store & Low-Latency Model Serving Platform** built for high-throughput credit card fraud detection. The platform unifies **Dual-Path Feature Processing** (PyFlink streaming window aggregations & DuckDB batch historical transforms), manages feature lifecycle via **Feast** (Redis online store for sub-5ms low-latency retrieval & MinIO S3 offline store for point-in-time joins), enforces schema data quality through **Pandera**, monitors feature drift via **Evidently AI**, trains an **XGBoost + LightGBM Model Ensemble** with SHAP explainability, serves online inference via **FastAPI**, orchestrates automated continuous training (CT) through **Prefect 3**, and provides operational observability using **Prometheus**, **Grafana**, and **Streamlit**.
+An enterprise-grade **Real-Time Machine Learning Feature Store & Low-Latency Model Serving Platform** built for high-throughput credit card fraud detection. The platform unifies **Dual-Path Feature Processing** (PyFlink streaming window aggregations & DuckDB batch historical transforms), manages feature lifecycle via **Feast** (Redis online store for sub-1ms low-latency retrieval & MinIO S3 offline store for point-in-time joins), enforces schema data quality through **Pandera**, monitors feature drift via **Evidently AI**, trains an **XGBoost + LightGBM Model Ensemble** with SHAP explainability, serves online inference via **FastAPI**, orchestrates automated continuous training (CT) through **Prefect 3**, and provides operational observability using **Prometheus**, **Grafana**, and **Streamlit**.
 
-**Business Goal:** Detect anomalous and fraudulent financial transactions in real-time under a strict **< 5ms SLA**, preventing financial loss while minimizing false positives through dynamic on-demand feature transformations and automated drift-triggered continuous retraining.
+**Business Goal:** Detect anomalous and fraudulent financial transactions in real-time under a strict **< 50ms P95 API Latency SLA** (with sub-1ms Redis feature lookup), preventing financial loss while minimizing false positives through dynamic on-demand feature transformations and automated drift-triggered continuous retraining.
 
 ---
 
@@ -23,7 +23,7 @@ flowchart TD
     end
 
     subgraph FeatureStore [Feast Feature Store]
-        redis["Online Store: Redis 7.2<br/>(< 5ms Low-Latency Feature Lookup)"]:::redis
+        redis["Online Store: Redis 7.2<br/>(< 1ms Low-Latency Feature Lookup)"]:::redis
         minio["Offline Store: MinIO S3<br/>(Hive-Partitioned Lakehouse Parquet)"]:::minio
         feast_registry["Feast Registry & On-Demand Engine<br/>(Ratio, Z-Score & Velocity UDFs)"]:::feast
     end
@@ -41,7 +41,7 @@ flowchart TD
     end
 
     subgraph Serving [Serving & Analytics Layer]
-        fastapi["FastAPI Model Serving REST API<br/>(/predict Endpoint < 5ms SLA)"]:::serving
+        fastapi["FastAPI Model Serving REST API<br/>(/predict Endpoint < 50ms P95 SLA)"]:::serving
         streamlit["Streamlit Analytics Dashboard<br/>(Real-Time Monitoring UI)"]:::viz
         grafana["Grafana & Prometheus<br/>(System & Redis Metrics)"]:::viz
     end
@@ -156,7 +156,7 @@ The serving layer exposes a low-latency endpoint with predictable JSON payload c
 }
 ```
 
-### Response Contract (< 5ms SLA)
+### Response Contract (< 50ms P95 SLA)
 ```json
 {
   "card_id": "11556",
@@ -177,8 +177,8 @@ The serving layer exposes a low-latency endpoint with predictable JSON payload c
 ## Pipeline Workflow
 
 ### 1. Dual-Path Feature Ingestion Engine
-* **Real-Time Stream Processing (`PyFlink`):** Consumes live transaction streams from Redpanda/Kafka (`raw_transactions`). Calculates sliding window metrics (1m, 5m, 1h velocity counts, 24h average/stddev transaction amounts) and pushes stream features directly into the Redis online feature store (`card_stream_features`).
-* **DLQ Quarantine Side Output:** Malformed JSON records, negative transaction amounts, or missing entity keys are automatically routed to a Dead Letter Queue (DLQ) side output stream and quarantined into `data/lakehouse/dlq/stream_errors.parquet`.
+* **Real-Time Stream Processing (`PyFlink` / `DirectStreamProcessor`):** Consumes live transaction streams from Redpanda/Kafka (`raw_transactions`). Calculates sliding window metrics (1m, 5m, 1h velocity counts, 24h average/stddev transaction amounts) and pushes stream features directly into the Redis online feature store (`card_stream_features`).
+* **DLQ Quarantine Side Output:** Malformed JSON records, negative transaction amounts, or missing entity keys are automatically routed to a Dead Letter Queue (DLQ) side output stream and quarantined into partitioned Parquet Lakehouse (`data/lakehouse/dlq/`).
 * **Historical Batch Lakehouse (`DuckDB`):** Executes high-performance analytical queries over historical transaction logs, computing 7-day and 30-day windowed metrics (`trans_count_7d`, `trans_count_30d`, `avg_amount_30d`, `max_amount_30d`). Exports partitioned Parquet files to the MinIO S3 Lakehouse (`feature-store-offline`).
 
 ### 2. Feast Feature Store & On-Demand Derivations
@@ -195,8 +195,8 @@ The serving layer exposes a low-latency endpoint with predictable JSON payload c
 * **SHAP Explainability:** Calculates SHAP values to output global feature importance rankings and beeswarm distribution plots (`dashboards/shap_summary_beeswarm.png`).
 * **Event-Driven Retraining:** Automatically triggers model retraining if Evidently AI flags significant dataset drift or upon scheduled cron execution.
 
-### 5. Low-Latency REST API Serving (< 5ms SLA)
-* **FastAPI Server (`src/api/main.py`):** Exposes `/predict` and `/health` endpoints. On transaction request, fetches pre-calculated online features from Redis, evaluates on-demand derived features, runs model ensemble inference, and returns decision metrics under **5 milliseconds**.
+### 5. Low-Latency REST API Serving (< 50ms P95 SLA)
+* **FastAPI Server (`src/api/main.py`):** Exposes `/predict` and `/health` endpoints. On transaction request, fetches pre-calculated online features from Redis (< 1ms), evaluates on-demand derived features, runs model ensemble inference, and returns decision metrics under **50 milliseconds (P95)**.
 
 ### 6. Orchestration & Observability
 * **Prefect 3 Flow (`execute.py`):** Coordinates end-to-end steps: Batch execution → Stream DLQ audit → Feast materialization → End-to-end verification → Evidently drift analysis → Hybrid CT retraining decision.
@@ -209,7 +209,7 @@ The serving layer exposes a low-latency endpoint with predictable JSON payload c
 ## Key Engineering Highlights
 
 * **Dual-Path Feature Store Architecture:** Seamlessly unifies low-latency real-time streaming features (PyFlink + PushSource) and scalable historical batch features (DuckDB + FileSource).
-* **Sub-5ms Inference SLA:** Direct Redis online feature caching and warm-loaded model artifacts enable ultra-low-latency REST API prediction responses.
+* **Sub-50ms End-to-End Inference SLA:** Direct Redis online feature caching (< 1ms) and warm-loaded model artifacts enable ultra-low-latency REST API prediction responses.
 * **Strict DLQ Quarantine Policy:** Non-blocking streaming pipeline with dedicated Dead Letter Queue (DLQ) side outputs to isolate corrupt payloads without halting ingestion.
 * **Pandera DQ Assertions & Governance:** Integrated data validation layer preventing schema drift or invalid values from corrupting downstream models.
 * **Automated Hybrid Continuous Training (CT):** Prefect 3 flow dynamically evaluates Evidently AI drift scores to automate retraining decisions, preventing model degradation.
@@ -229,7 +229,7 @@ ml-feature-store-platform/
 │
 ├── src/                               # System Core Source Code
 │   ├── api/                           # Low-Latency Model Serving REST API
-│   │   └── main.py                    # FastAPI server (< 5ms SLA) fetching online features & scoring fraud
+│   │   └── main.py                    # FastAPI server (< 50ms P95 SLA) fetching online features & scoring fraud
 │   │
 │   ├── config/                        # System Configurations
 │   │   ├── __init__.py
@@ -280,7 +280,7 @@ ml-feature-store-platform/
 │   ├── test_config_logger.py          # Settings, ISO Logger & Ensemble verification tests
 │   ├── test_ml_training.py            # Cost Matrix & Decision Threshold tests
 │   ├── test_quality_gate.py           # Pandera Schema Gate & Quarantine tests
-│   ├── test_serving_latency_benchmark.py # Sub-5ms Warm-Path Serving SLA Latency Benchmark
+│   ├── test_serving_latency_benchmark.py # Sub-50ms Warm-Path Serving SLA Latency Benchmark
 │   ├── test_streaming_sink.py         # DualPathRedisFeatureSink & DLQ Isolation tests
 │   └── test_utils_clients.py          # MinIO & Redis Client connection & health tests
 │
@@ -358,7 +358,7 @@ Launch the transaction event producer to simulate live transaction traffic (run 
 PYTHONPATH=. python src/producer/producer.py
 ```
 
-### 7. Launch Model Serving REST API (< 5ms SLA)
+### 7. Launch Model Serving REST API (< 50ms P95 SLA)
 
 Start the FastAPI low-latency inference server:
 
