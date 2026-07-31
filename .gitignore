@@ -34,3 +34,11 @@ data/*.parquet
 *.log
 
 docs/
+
+# ML & Dashboard Artifacts
+models/*.joblib
+models/*.json
+models/*.png
+dashboards/*.html
+dashboards/*.png
+data/offline_feature_store/

@@ -57,7 +57,6 @@ class SystemSettings(BaseSettings):
     api_port: int = Field(default=8000, alias="FASTAPI_PORT")
     streamlit_port: int = Field(default=8501, alias="STREAMLIT_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
-    metrics_port: int = Field(default=9091, alias="METRICS_PORT")
 
     # Fraud Decision & Cost Matrix Parameters
     default_fp_cost: float = Field(default=2.0, alias="DEFAULT_FP_COST")
@@ -94,14 +93,4 @@ def get_settings() -> SystemSettings:
 
 settings = get_settings()
 
-# Auto-bootstrap runtime directory structure
-for path_obj in (
-    PROJECT_DIR / "data",
-    PROJECT_DIR / "models",
-    PROJECT_DIR / "dashboards",
-    PROJECT_DIR / "logs",
-    PROJECT_DIR / "data" / "lakehouse" / "batch_features",
-    PROJECT_DIR / "data" / "lakehouse" / "dlq",
-):
-    path_obj.mkdir(parents=True, exist_ok=True)
 
