@@ -77,25 +77,3 @@ def generate_feature_drift_report(
         logger.error(f"Failed to generate Evidently AI drift report: {e}")
         return {"status": "FAILED", "error": str(e)}
 
-
-if __name__ == "__main__":
-    logger.info("Running Evidently AI Feature Monitoring Self-Test...")
-    import numpy as np
-
-    np.random.seed(42)
-    ref_sample = pd.DataFrame({
-        "trans_count_7d": np.random.poisson(lam=5, size=100),
-        "trans_count_30d": np.random.poisson(lam=20, size=100),
-        "avg_amount_30d": np.random.normal(loc=150.0, scale=30.0, size=100),
-        "max_amount_30d": np.random.normal(loc=500.0, scale=100.0, size=100),
-    })
-
-    curr_sample = pd.DataFrame({
-        "trans_count_7d": np.random.poisson(lam=5, size=100),
-        "trans_count_30d": np.random.poisson(lam=20, size=100),
-        "avg_amount_30d": np.random.normal(loc=450.0, scale=80.0, size=100),
-        "max_amount_30d": np.random.normal(loc=1500.0, scale=300.0, size=100),
-    })
-
-    res = generate_feature_drift_report(ref_sample, curr_sample)
-    logger.info(f"Self-test Result: {res}")
