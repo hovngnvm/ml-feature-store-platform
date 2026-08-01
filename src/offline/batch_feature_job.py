@@ -11,7 +11,7 @@ import duckdb
 
 from src.config import settings
 from src.utils.logger import get_logger
-from src.utils.minio_client import upload_folder_to_minio
+from src.utils.minio_client import upload_file_to_minio
 from src.quality.data_assert import validate_batch_dataframe
 
 logger = get_logger(__name__)
@@ -38,8 +38,6 @@ def run_batch_feature_pipeline(dataset_path: str | Path = settings.raw_csv_path)
 
     con = duckdb.connect(database=":memory:")
     dataset_path_str = path_dataset.as_posix()
-    partition_file_str = partition_file.as_posix()
-    batch_parquet_str = Path(settings.batch_parquet_path).as_posix()
 
     con.execute(f"""
         CREATE VIEW raw_transactions AS
@@ -72,36 +70,34 @@ def run_batch_feature_pipeline(dataset_path: str | Path = settings.raw_csv_path)
         GROUP BY card_id;
     """).df()
 
+    con.close()
     logger.info(f"Computed batch features for {len(batch_features_df):,} unique cards.")
 
-    try:
-        is_valid, clean_df, error_df = validate_batch_dataframe(batch_features_df)
-        if not is_valid:
-            if clean_df is not None and not clean_df.empty:
-                logger.warning("[DQ Gate Warning] Batch features contained invalid rows; proceed with sanitized DataFrame.")
-                batch_features_df = clean_df
-            else:
-                raise ValueError("[DQ Gate Error] All batch feature rows failed data quality validation.")
-    except Exception as e:
-        logger.error(f"Pandera Data Quality Gate check failure: {e}")
-        raise
+    is_valid, clean_df, error_df = validate_batch_dataframe(batch_features_df)
+    if not is_valid:
+        if clean_df is not None and not clean_df.empty:
+            logger.warning("[DQ Gate Warning] Batch features contained invalid rows; proceed with sanitized DataFrame.")
+            batch_features_df = clean_df
+        else:
+            raise ValueError("[DQ Gate Error] All batch feature rows failed data quality validation.")
 
-    con.execute(f"COPY (SELECT * FROM batch_features_df) TO '{partition_file_str}' (FORMAT PARQUET);")
+    batch_features_df.to_parquet(partition_file, index=False)
 
     # Also save single file for Feast default path compatibility
     Path(settings.batch_parquet_path).parent.mkdir(parents=True, exist_ok=True)
-    con.execute(f"COPY (SELECT * FROM batch_features_df) TO '{batch_parquet_str}' (FORMAT PARQUET);")
-    con.close()
+    batch_features_df.to_parquet(settings.batch_parquet_path, index=False)
 
     elapsed = time.time() - start_time
     logger.info(f"Generated Hive Partitioned Parquet Lakehouse at '{partition_file}' in {elapsed:.2f}s.")
 
-    upload_folder_to_minio(
-        local_folder=settings.lakehouse_base_dir,
+    partition_object_name = f"batch_features/year={year_str}/month={month_str}/day={day_str}/batch_part_000.parquet"
+    upload_file_to_minio(
+        local_path=partition_file,
+        object_name=partition_object_name,
         bucket_name=settings.minio_bucket,
-        minio_prefix="batch_features"
     )
     return str(partition_file)
+
 
 
 if __name__ == "__main__":

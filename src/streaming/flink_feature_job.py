@@ -6,20 +6,17 @@ pushes online features to Redis (< 5ms SLA), archives raw stream to Lakehouse Pa
 and routes corrupt payloads to DLQ side output.
 """
 
-import os
-import sys
 import time
 import json
-import math
 import uuid
 import argparse
+import statistics
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import pandas as pd
 from kafka import KafkaConsumer, KafkaProducer
-from prometheus_client import Counter, Histogram, start_http_server
 
 from src.config import settings
 from src.utils.logger import get_logger
@@ -27,21 +24,6 @@ from src.utils.redis_client import get_redis_client
 from src.utils.minio_client import upload_file_to_minio
 
 logger = get_logger(__name__)
-
-EVENTS_PROCESSED = Counter('stream_events_processed_total', 'Total valid stream events processed')
-EVENTS_CORRUPT_DLQ = Counter('stream_events_dlq_total', 'Total corrupt events sent to DLQ side output')
-REDIS_LATENCY = Histogram('redis_hset_latency_seconds', 'Redis HSET Latency in seconds')
-
-
-def init_metrics_exporter(port: int = 9091) -> bool:
-    """Initializes Prometheus metrics exporter server."""
-    try:
-        start_http_server(port)
-        logger.info(f"Prometheus Metrics Exporter server started on port {port}.")
-        return True
-    except Exception as e:
-        logger.warning(f"Prometheus exporter server could not start on port {port}: {e}")
-        return False
 
 
 def register_kafka_source(t_env: Any) -> None:
@@ -81,13 +63,10 @@ def transform_stream(t_env: Any) -> Any:
     Applies Data Quality (DQ) Gateways, Business Rule Assertions, 
     and Schema Normalization using PyFlink Table API.
     """
-    try:
-        from pyflink.table.expressions import col
-    except (ImportError, ModuleNotFoundError):
-        logger.error("pyflink.table.expressions.col is not available.")
-        return None
+    from pyflink.table.expressions import col
 
     transactions = t_env.from_path("raw_transactions_kafka")
+
 
     valid_transactions = transactions.filter(
         (col("card_id").is_not_null) &
@@ -120,9 +99,11 @@ def setup_flink_environment() -> tuple[Any, Any]:
     try:
         from pyflink.datastream import StreamExecutionEnvironment
         from pyflink.table import StreamTableEnvironment, EnvironmentSettings
-    except (ImportError, ModuleNotFoundError):
-        logger.warning("PyFlink is not installed or available in this Python environment.")
-        return None, None
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise RuntimeError(
+            "PyFlink is required when running with --engine flink, but is not installed. "
+            "Install apache-flink and ensure Java 11 JDK is available."
+        ) from exc
 
     try:
         env = StreamExecutionEnvironment.get_execution_environment()
@@ -214,11 +195,10 @@ class DualPathRedisFeatureSink:
 
     def route_to_dlq(self, event: dict, reason: str):
         """Pushes invalid event to Kafka DLQ topic & records error buffer."""
-        EVENTS_CORRUPT_DLQ.inc()
         event_with_err = dict(event)
         event_with_err["error_reason"] = reason
         event_with_err["quarantine_timestamp"] = datetime.now(timezone.utc).isoformat()
-        
+
         self.dlq_events_buffer.append(event_with_err)
 
         if self.dlq_producer:
@@ -241,7 +221,7 @@ class DualPathRedisFeatureSink:
         card_id = str(event["card_id"])
         amount = float(event.get("amount", 0.0))
         c2 = float(event.get("c2", 0.0))
-        
+
         ts_str = str(event.get("timestamp", ""))
         try:
             event_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -290,13 +270,7 @@ class DualPathRedisFeatureSink:
         amounts_24h = [e[1] for e in events_24h]
         avg_amount_24h = sum(amounts_24h) / len(amounts_24h) if amounts_24h else 0.0
         max_amount_24h = max(amounts_24h) if amounts_24h else 0.0
-        
-        if len(amounts_24h) > 1:
-            mean = avg_amount_24h
-            variance = sum((x - mean) ** 2 for x in amounts_24h) / len(amounts_24h)
-            stddev_amount_24h = math.sqrt(variance)
-        else:
-            stddev_amount_24h = 0.0
+        stddev_amount_24h = round(statistics.pstdev(amounts_24h), 2) if len(amounts_24h) > 1 else 0.0
 
         feature_vector = {
             "card_id": card_id,
@@ -314,13 +288,12 @@ class DualPathRedisFeatureSink:
 
         redis_key = f"card:{card_id}:stream_features"
         try:
-            with REDIS_LATENCY.time():
-                self.redis_client.hset(redis_key, mapping={k: str(v) for k, v in feature_vector.items()})
+            self.redis_client.hset(redis_key, mapping={k: str(v) for k, v in feature_vector.items()})
         except Exception as e:
             logger.warning(f"Failed to update Redis key {redis_key}: {e}")
 
-        EVENTS_PROCESSED.inc()
         return feature_vector
+
 
     def flush_cold_path_archive(self) -> bool:
         """Flushes buffered raw events and DLQ to Partitioned Parquet Lakehouse & MinIO S3 Storage."""
@@ -453,17 +426,8 @@ def main() -> None:
         elapsed = time.time() - start_time
         logger.info(f"Stream Job completed. Valid: {processed_count}, Corrupt: {corrupt_count} in {elapsed:.2f}s.")
     except Exception as e:
-        logger.warning(f"Kafka Broker offline ({e}). Executing Dual-Path & DLQ Probe...")
-        sink = DualPathRedisFeatureSink(dlq_producer=dlq_producer)
-        sample_events = [
-            {"transaction_id": 1001, "card_id": "11556", "amount": 150.0, "timestamp": "2026-07-28T12:00:00Z"},
-            {"transaction_id": 1002, "card_id": "11556", "amount": -999.0, "timestamp": "2026-07-28T12:02:00Z"},
-            {"transaction_id": 1003, "card_id": "unknown_card", "amount": 250.0, "timestamp": "2026-07-28T12:03:00Z"}
-        ]
-        for event in sample_events:
-            sink.process_event(event)
-        sink.flush_cold_path_archive()
-        logger.info("Dual-Path & DLQ Probe completed successfully.")
+        logger.error(f"Stream Engine encountered fatal error: {e}")
+        raise
 
 
 if __name__ == "__main__":
