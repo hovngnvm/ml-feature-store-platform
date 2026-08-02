@@ -294,6 +294,13 @@ def train_ensemble_pipeline(
         json.dump(report_dict, f, indent=2)
 
     logger.info(f"Saved Model Evaluation Report JSON to '{path_report}'")
+
+    try:
+        from src.ml.explain import generate_global_shap_explanations
+        generate_global_shap_explanations()
+    except Exception as e:
+        logger.warning(f"Could not generate SHAP explanations after training: {e}")
+
     return report_dict
 
 

@@ -51,3 +51,14 @@ class FraudModelEnsemble:
             threshold = self.optimal_threshold
         proba = self.predict_proba(X)[:, 1]
         return (proba >= threshold).astype(int)
+
+
+def derive_transaction_features(
+    amount: float,
+    avg_amount_30d: float,
+    max_amount_30d: float,
+) -> tuple[float, float]:
+    """Computes standard derived features: (amount_ratio_30d, is_amount_gt_30d_max)."""
+    ratio_30d = float(amount) / (float(avg_amount_30d) + 1.0)
+    is_gt_max = 1.0 if float(amount) > float(max_amount_30d) else 0.0
+    return ratio_30d, is_gt_max

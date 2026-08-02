@@ -8,6 +8,7 @@ import pandas as pd
 
 from src.config import settings
 from src.utils.logger import get_logger
+from src.ml.ensemble import derive_transaction_features
 
 logger = get_logger(__name__)
 
@@ -57,8 +58,9 @@ def prepare_training_dataset(
     logger.info("Performing Feature Join (Batch Features + Target Labels)...")
     df_joined = pd.merge(df_raw, df_batch, on="card_id", how="inner")
 
-    df_joined["amount_ratio_30d"] = df_joined["TransactionAmt"] / (df_joined["avg_amount_30d"] + 1.0)
-    df_joined["is_amount_gt_30d_max"] = (df_joined["TransactionAmt"] > df_joined["max_amount_30d"]).astype(float)
+    df_joined["amount_ratio_30d"], df_joined["is_amount_gt_30d_max"] = derive_transaction_features(
+        df_joined["TransactionAmt"], df_joined["avg_amount_30d"], df_joined["max_amount_30d"]
+    )
 
     for col in FEATURE_COLUMNS:
         if col in df_joined.columns:
