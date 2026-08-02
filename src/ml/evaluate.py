@@ -10,13 +10,13 @@ import joblib
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.metrics import (
     precision_recall_curve,
     roc_curve,
     auc,
     confusion_matrix,
-    classification_report
+    classification_report,
+    ConfusionMatrixDisplay,
 )
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
@@ -197,16 +197,13 @@ def evaluate_models() -> None:
     # Confusion Matrix at Optimal Threshold
     y_pred_opt = (y_prob_ens >= optimal_th).astype(int)
     cm = confusion_matrix(y_val, y_pred_opt)
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Reds", cbar=False,
-                xticklabels=["Legitimate (0)", "Fraud (1)"],
-                yticklabels=["Legitimate (0)", "Fraud (1)"])
-    plt.title(f"Model Ensemble Confusion Matrix (Optimal θ = {optimal_th:.4f})")
-    plt.xlabel("Predicted Label")
-    plt.ylabel("True Label")
+    fig, ax = plt.subplots(figsize=(6, 5))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Legitimate (0)", "Fraud (1)"])
+    disp.plot(cmap="Reds", ax=ax, colorbar=False)
+    ax.set_title(f"Model Ensemble Confusion Matrix (Optimal θ = {optimal_th:.4f})")
     cm_path = model_dir_path / "confusion_matrix.png"
-    plt.savefig(cm_path, dpi=300, bbox_inches="tight")
-    plt.close()
+    fig.savefig(cm_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
     logger.info(f"Saved Confusion Matrix plot to '{cm_path}'")
 
     report_str = classification_report(y_val, y_pred_opt, target_names=["Legitimate", "Fraud"])

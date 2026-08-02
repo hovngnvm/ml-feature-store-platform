@@ -5,12 +5,11 @@ scoring transactions via Model Ensemble (XGBoost + LightGBM), and evaluating ris
 against the dynamically tuned cost-optimal decision threshold.
 """
 
-import sys
 import time
+from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from typing import Any
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, status
@@ -19,11 +18,8 @@ from feast import FeatureStore
 
 from src.config import settings
 from src.utils.logger import get_logger
-from src.ml.ensemble import FraudModelEnsemble
+from src.ml.ensemble import FraudModelEnsemble, derive_transaction_features
 from src.utils.redis_client import get_redis_client, check_redis_health
-
-if "__main__" in sys.modules and not hasattr(sys.modules["__main__"], "FraudModelEnsemble"):
-    setattr(sys.modules["__main__"], "FraudModelEnsemble", FraudModelEnsemble)
 
 logger = get_logger(__name__)
 
@@ -164,7 +160,7 @@ def predict_fraud(req: TransactionRequest) -> PredictionResponse:
     }
 
     # Retrieve Online Features via Feast Online Store
-    if feast_store:
+    if feast_store and redis_client is not None and check_redis_health(redis_client):
         try:
             res_dict = feast_store.get_online_features(
                 features=[
@@ -197,19 +193,17 @@ def predict_fraud(req: TransactionRequest) -> PredictionResponse:
     # Compute Derived Features
     avg_30d = online_features.get("avg_amount_30d", curr_amount)
     max_30d = online_features.get("max_amount_30d", curr_amount)
-
-    online_features["amount_ratio_30d"] = curr_amount / (avg_30d + 1.0)
-    online_features["is_amount_gt_30d_max"] = 1.0 if curr_amount > max_30d else 0.0
+    online_features["amount_ratio_30d"], online_features["is_amount_gt_30d_max"] = derive_transaction_features(
+        curr_amount, avg_30d, max_30d
+    )
 
     feature_cols = ensemble_model.feature_names
     input_df = pd.DataFrame([online_features])[feature_cols].fillna(0.0)
 
-    # Run Single-Pass Model Inference & Blend
+    # Run Model Inference via Encapsulated Ensemble Blending
+    fraud_score = float(ensemble_model.predict_proba(input_df)[0, 1])
     xgb_score = float(ensemble_model.xgb_model.predict_proba(input_df)[0, 1])
     lgb_score = float(ensemble_model.lgb_model.predict_proba(input_df)[0, 1])
-    w_xgb = getattr(ensemble_model, "xgb_weight", 0.5)
-    w_lgb = getattr(ensemble_model, "lgb_weight", 0.5)
-    fraud_score = float(w_xgb * xgb_score + w_lgb * lgb_score)
 
     # Evaluate against Dynamic Optimal Decision Threshold
     decision_th = float(getattr(ensemble_model, "optimal_threshold", 0.5))

@@ -18,19 +18,15 @@ def get_redis_client() -> redis.Redis:
             port=settings.redis_port,
             max_connections=50,
             decode_responses=True,
+            socket_connect_timeout=1.0,
+            socket_timeout=1.0,
         )
     return redis.Redis(connection_pool=_redis_pool)
 
 
-def reset_redis_pool() -> None:
-    """Closes and resets the connection pool for testing and lifecycle management."""
-    global _redis_pool
-    if _redis_pool is not None:
-        _redis_pool.disconnect()
-        _redis_pool = None
-
 
 def check_redis_health(client: redis.Redis | None = None) -> bool:
+
     """Probes Redis connection health."""
     try:
         r = client or get_redis_client()
