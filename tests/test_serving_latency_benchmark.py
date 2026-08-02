@@ -5,7 +5,6 @@ across Online Feature Parsing, On-Demand Feature Engineering, and Model
 Ensemble Blended Scoring over warm-path inference iterations.
 """
 
-import sys
 from pathlib import Path
 import json
 import time
@@ -16,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import settings
-from src.ml.ensemble import FraudModelEnsemble
+from src.ml.ensemble import FraudModelEnsemble, derive_transaction_features
 
 
 def assemble_feature_payload(
@@ -30,8 +29,8 @@ def assemble_feature_payload(
     avg_30d = cached.get("avg_amount_30d", 100.0)
     max_30d = cached.get("max_amount_30d", 500.0)
 
-    ratio_30d = current_amount / (avg_30d + 1.0)
-    is_gt_max = int(current_amount > max_30d)
+    ratio_30d, is_gt_max = derive_transaction_features(current_amount, avg_30d, max_30d)
+
 
     feature_dict = {
         "trans_count_7d": cached.get("trans_count_7d", 1),

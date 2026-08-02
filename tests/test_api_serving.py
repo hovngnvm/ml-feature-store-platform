@@ -36,8 +36,28 @@ def mock_redis_healthy(monkeypatch):
     return mock_redis
 
 
-def test_fastapi_health_endpoint() -> None:
+@pytest.fixture
+def mock_feast_store(monkeypatch):
+    mock_store = MagicMock()
+    mock_response = MagicMock()
+    mock_response.to_dict.return_value = {
+        "card_batch_features:trans_count_7d": [5],
+        "card_batch_features:trans_count_30d": [20],
+        "card_batch_features:avg_amount_30d": [150.0],
+        "card_batch_features:max_amount_30d": [500.0],
+        "card_batch_features:distinct_addr_7d": [2],
+        "card_batch_features:days_since_last_trans": [1.5],
+    }
+    mock_store.get_online_features.return_value = mock_response
+    monkeypatch.setattr("src.api.main.FeatureStore", lambda repo_path: mock_store)
+    monkeypatch.setattr("src.api.main.feast_store", mock_store)
+    return mock_store
+
+
+
+def test_fastapi_health_endpoint(mock_redis_healthy) -> None:
     """Verifies GET /health returns HTTP 200 status."""
+
     with TestClient(app) as client:
         response = client.get("/health")
         assert response.status_code == 200
@@ -65,7 +85,7 @@ def test_fastapi_readiness_endpoint_redis_unreachable(mock_ensemble_model, monke
         assert response.status_code == 503
 
 
-def test_fastapi_predict_endpoint(mock_ensemble_model) -> None:
+def test_fastapi_predict_endpoint(mock_ensemble_model, mock_redis_healthy, mock_feast_store) -> None:
     """Verifies POST /predict returns valid fraud score, decision, and decision_threshold with HTTP 200."""
     with TestClient(app) as client:
         payload = {
@@ -73,6 +93,7 @@ def test_fastapi_predict_endpoint(mock_ensemble_model) -> None:
             "current_amount": 250.0
         }
         response = client.post("/predict", json=payload)
+
         assert response.status_code == 200
         data = response.json()
         assert "fraud_score" in data
