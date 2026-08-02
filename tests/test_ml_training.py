@@ -5,11 +5,11 @@ Verifies Cost Matrix optimization logic, Dynamic Decision Threshold Tuning, and 
 """
 
 from pathlib import Path
+import pytest
 import numpy as np
 from src.config import settings
 from src.ml.train import find_optimal_decision_threshold
 from src.ml.evaluate import evaluate_models
-from src.ml.ensemble import FraudModelEnsemble
 
 
 def test_optimal_threshold_tuning() -> None:
@@ -36,9 +36,6 @@ def test_optimal_threshold_tuning() -> None:
     assert res["savings_amount"] >= 0.0
     assert "f1_optimal_threshold" in res
     assert "f2_optimal_threshold" in res
-
-
-import pytest
 
 
 def test_evaluate_models_execution() -> None:

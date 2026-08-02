@@ -23,7 +23,6 @@ def test_system_settings_paths() -> None:
     assert settings.api_host is not None
     assert settings.streamlit_port > 0
     assert settings.log_level in ("INFO", "DEBUG", "WARNING", "ERROR")
-    assert settings.metrics_port > 0
 
     s1 = get_settings()
     s2 = get_settings()

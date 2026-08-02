@@ -1,7 +1,7 @@
 """
 Automated Data Quality Gate Test Suite.
 
-Verifies Pandera schema assertion gate filters valid transactions and quarantines invalid records.
+Verifies schema assertion gate filters valid transactions and quarantines invalid records.
 """
 
 import pandas as pd
@@ -9,7 +9,7 @@ from src.quality.data_assert import validate_batch_dataframe
 
 
 def test_data_quality_gate() -> None:
-    """Verifies Pandera Schema Gate filters valid and quarantined invalid rows."""
+    """Verifies Schema Assertion Gate filters valid and quarantined invalid rows."""
     valid_data = pd.DataFrame([{
         "card_id": "11556",
         "trans_count_7d": 3,
@@ -39,7 +39,7 @@ def test_data_quality_gate() -> None:
 
 
 def test_data_quality_gate_custom_index() -> None:
-    """Verifies Pandera Schema Gate handles non-default indexes without IndexError."""
+    """Verifies Schema Assertion Gate handles non-default indexes without IndexError."""
     df_mixed = pd.DataFrame([
         {
             "card_id": "card_ok",
