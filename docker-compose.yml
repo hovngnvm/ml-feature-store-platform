@@ -90,17 +90,8 @@ services:
       - "9090:9090"
     volumes:
       - ./dashboards/prometheus.yml:/etc/prometheus/prometheus.yml
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  grafana:
-    image: grafana/grafana:10.3.0
-    container_name: grafana
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
 
 volumes:
   redis_data:
   minio_data:
+

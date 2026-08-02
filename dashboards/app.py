@@ -1,12 +1,10 @@
 from pathlib import Path
 import json
 import time
-from typing import Any
 import joblib
 import pandas as pd
 import numpy as np
 import streamlit as st
-import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import shap
 
@@ -19,7 +17,7 @@ st.set_page_config(
 )
 
 from src.config import settings
-from src.ml.ensemble import FraudModelEnsemble
+from src.ml.ensemble import FraudModelEnsemble, derive_transaction_features
 from src.utils.redis_client import get_redis_client
 
 MODEL_PATH = Path(settings.model_artifact_path)
@@ -160,20 +158,19 @@ with tab1:
                 curr_amount = float(amount)
                 avg_30d = float(card_features["avg_amount_30d"])
                 max_30d = float(card_features["max_amount_30d"])
-                
+
                 online_features = dict(card_features)
                 online_features["TransactionAmt"] = curr_amount
-                online_features["amount_ratio_30d"] = curr_amount / (avg_30d + 1.0)
-                online_features["is_amount_gt_30d_max"] = 1.0 if curr_amount > max_30d else 0.0
+                online_features["amount_ratio_30d"], online_features["is_amount_gt_30d_max"] = derive_transaction_features(
+                    curr_amount, avg_30d, max_30d
+                )
 
                 feature_cols = model_pipeline.feature_names
                 input_df = pd.DataFrame([online_features])[feature_cols]
 
+                fraud_score = float(model_pipeline.predict_proba(input_df)[0, 1])
                 xgb_p = float(model_pipeline.xgb_model.predict_proba(input_df)[0, 1])
                 lgb_p = float(model_pipeline.lgb_model.predict_proba(input_df)[0, 1])
-                w_xgb = getattr(model_pipeline, "xgb_weight", 0.5)
-                w_lgb = getattr(model_pipeline, "lgb_weight", 0.5)
-                fraud_score = float(w_xgb * xgb_p + w_lgb * lgb_p)
                 latency_ms = (time.perf_counter() - start_t) * 1000.0
 
                 decision_th = float(getattr(model_pipeline, "optimal_threshold", 0.5))
@@ -184,26 +181,7 @@ with tab1:
                 st.markdown(f'<div class="{status_class}">{decision_str}</div>', unsafe_allow_html=True)
                 st.markdown(f"**Fraud Risk Score:** `{fraud_score * 100:.2f}%` | **Cost-Optimal Threshold (θ):** `{decision_th * 100:.2f}%` | **SLA Latency:** `{latency_ms:.2f} ms`")
 
-                fig_gauge = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=fraud_score * 100,
-                    title={'text': "Fraud Risk Score (%)"},
-                    gauge={
-                        'axis': {'range': [0, 100]},
-                        'bar': {'color': "#ff1744" if is_fraud else "#00e676"},
-                        'steps': [
-                            {'range': [0, decision_th * 100], 'color': "rgba(0, 230, 118, 0.2)"},
-                            {'range': [decision_th * 100, 100], 'color': "rgba(255, 23, 68, 0.2)"}
-                        ],
-                        'threshold': {
-                            'line': {'color': "red", 'width': 4},
-                            'thickness': 0.75,
-                            'value': decision_th * 100
-                        }
-                    }
-                ))
-                fig_gauge.update_layout(height=220, margin=dict(l=20, r=20, t=30, b=20))
-                st.plotly_chart(fig_gauge, use_container_width=True)
+                st.progress(min(max(fraud_score, 0.0), 1.0))
 
                 m1, m2, m3 = st.columns(3)
                 m1.metric("XGBoost Score", f"{xgb_p * 100:.1f}%")
@@ -224,6 +202,18 @@ with tab1:
             st.pyplot(fig)
         except Exception as e:
             st.info(f"SHAP Waterfall plot feature attribution notice: {e}")
+
+    beeswarm_path = Path(settings.dashboard_dir) / "shap_summary_beeswarm.png"
+    bar_path = Path(settings.dashboard_dir) / "shap_feature_importance.png"
+    if beeswarm_path.is_file() or bar_path.is_file():
+        with st.expander("🌐 Global Model SHAP Feature Attributions (from explain.py)", expanded=False):
+            c_shap1, c_shap2 = st.columns(2)
+            if beeswarm_path.is_file():
+                with c_shap1:
+                    st.image(str(beeswarm_path), caption="Global SHAP Beeswarm Distribution", use_container_width=True)
+            if bar_path.is_file():
+                with c_shap2:
+                    st.image(str(bar_path), caption="Global SHAP Feature Importance Ranking", use_container_width=True)
 
 # Tab 2: Model Performance & Cost Optimization Benchmark
 with tab2:
