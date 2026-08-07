@@ -1,0 +1,21 @@
+# Core Dependencies for Real-Time Feature Store Project
+apache-flink==1.18.1
+feast[redis]==0.38.0
+redis==5.0.1
+fastapi==0.110.0
+uvicorn==0.28.0
+duckdb==0.10.1
+pandas==2.2.1
+pyarrow==15.0.0
+scikit-learn==1.4.1.post1
+kafka-python-ng==2.2.2
+confluent-kafka==2.3.0
+streamlit==1.32.0
+python-dotenv==1.0.1
+pydantic==2.6.4
+requests==2.31.0
+pytest==8.1.1
+pandera==0.32.1
+prefect==3.8.1
+prometheus-client==0.24.1
+evidently>=0.4.0
