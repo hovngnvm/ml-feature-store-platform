@@ -1,0 +1,65 @@
+{
+  "timestamp": "2026-08-09T06:11:43.273355+00:00",
+  "dataset_size": 49999,
+  "train_size": 39999,
+  "val_size": 10000,
+  "feature_count": 9,
+  "feature_names": [
+    "trans_count_7d",
+    "trans_count_30d",
+    "avg_amount_30d",
+    "max_amount_30d",
+    "distinct_addr_7d",
+    "days_since_last_trans",
+    "TransactionAmt",
+    "amount_ratio_30d",
+    "is_amount_gt_30d_max"
+  ],
+  "metrics": {
+    "xgboost": {
+      "pr_auc": 0.2328,
+      "roc_auc": 0.8522,
+      "f1_score": 0.2144,
+      "confusion_matrix": [
+        [
+          8393,
+          1336
+        ],
+        [
+          78,
+          193
+        ]
+      ]
+    },
+    "lightgbm": {
+      "pr_auc": 0.219,
+      "roc_auc": 0.8539,
+      "f1_score": 0.208,
+      "confusion_matrix": [
+        [
+          8320,
+          1409
+        ],
+        [
+          76,
+          195
+        ]
+      ]
+    },
+    "ensemble": {
+      "pr_auc": 0.2279,
+      "roc_auc": 0.8558,
+      "f1_score": 0.2152,
+      "confusion_matrix": [
+        [
+          8383,
+          1346
+        ],
+        [
+          76,
+          195
+        ]
+      ]
+    }
+  }
+}
