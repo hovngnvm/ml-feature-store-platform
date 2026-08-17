@@ -1,24 +1,22 @@
+"""
+Data Quality Assertion Engine (Pandera Schemas).
+
+Validates DataFrame structure, value bounds, and non-null constraints before committing to Lakehouse.
+Quarantines invalid rows into Batch DLQ Parquet files.
+"""
+
 import os
-import sys
-import logging
 import pandas as pd
-import pandera.pandas as pa
 from pandera.pandas import Column, Check, DataFrameSchema
-from pandera.errors import SchemaErrors, SchemaError
+from pandera.errors import SchemaErrors
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger("data_assert")
+from src.config.settings import settings
+from src.utils.logger import get_logger
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DLQ_DIR = os.path.join(PROJECT_DIR, "data", "lakehouse", "dlq")
-BATCH_DLQ_PATH = os.path.join(DLQ_DIR, "batch_errors.parquet")
+logger = get_logger("data_assert")
 
-# -----------------------------------------------------------------------------
-# 1. Pandera Schemas
-# -----------------------------------------------------------------------------
+BATCH_DLQ_PATH = os.path.join(settings.dlq_dir, "batch_errors.parquet")
+
 BatchFeatureSchema = DataFrameSchema(
     columns={
         "card_id": Column(
@@ -69,17 +67,9 @@ StreamEventSchema = DataFrameSchema(
     strict=False
 )
 
-# -----------------------------------------------------------------------------
-# 2. Validation Engine Functions
-# -----------------------------------------------------------------------------
-def validate_batch_dataframe(df: pd.DataFrame):
-    """
-    Validates batch feature DataFrame using Pandera BatchFeatureSchema.
-    Uses lazy=True to evaluate all rules and capture bad rows.
-    
-    Returns:
-        (is_valid: bool, clean_df: pd.DataFrame, error_df: pd.DataFrame or None)
-    """
+
+def validate_batch_dataframe(df: pd.DataFrame) -> tuple[bool, pd.DataFrame, pd.DataFrame | None]:
+    """Validates batch feature DataFrame using Pandera schema and splits valid vs quarantined records."""
     if df.empty:
         logger.error("[DQ Gate] DataFrame is EMPTY! Data Quality assertion failed.")
         return False, df, None
@@ -96,24 +86,22 @@ def validate_batch_dataframe(df: pd.DataFrame):
     except SchemaErrors as err:
         logger.error(f"[DQ Gate FAILED] Found schema violations in {len(err.failure_cases)} instances.")
         
-        # Extract bad row indices
         failure_cases = err.failure_cases
         invalid_indices = failure_cases["index"].dropna().astype(int).unique()
         
         error_df = df.iloc[invalid_indices].copy()
         clean_df = df.drop(index=invalid_indices).copy()
         
-        # Quarantine invalid rows into Batch DLQ Parquet
-        os.makedirs(DLQ_DIR, exist_ok=True)
+        os.makedirs(settings.dlq_dir, exist_ok=True)
         error_df.to_parquet(BATCH_DLQ_PATH, index=False)
         logger.warning(f"[DLQ Isolation] Quarantined {len(error_df)} invalid records to '{BATCH_DLQ_PATH}'")
         
         return False, clean_df, error_df
 
+
 if __name__ == "__main__":
     logger.info("Running Data Quality Assertion Engine Self-Test...")
     
-    # Valid Test Sample
     sample_valid = pd.DataFrame([{
         "card_id": "11556",
         "trans_count_7d": 5,
@@ -127,7 +115,6 @@ if __name__ == "__main__":
     is_valid, clean, errs = validate_batch_dataframe(sample_valid)
     assert is_valid, "Valid sample failed validation!"
     
-    # Corrupt Test Sample
     sample_corrupt = pd.DataFrame([
         {
             "card_id": "11556",
@@ -139,10 +126,10 @@ if __name__ == "__main__":
             "days_since_last_trans": 1.2
         },
         {
-            "card_id": "unknown_card",  # Invalid card_id
-            "trans_count_7d": -1,       # Invalid count < 0
+            "card_id": "unknown_card",
+            "trans_count_7d": -1,
             "trans_count_30d": 10,
-            "avg_amount_30d": -99.0,    # Invalid amount < 0
+            "avg_amount_30d": -99.0,
             "max_amount_30d": 50.0,
             "distinct_addr_7d": 1,
             "days_since_last_trans": 0.0

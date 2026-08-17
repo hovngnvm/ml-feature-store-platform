@@ -1,44 +1,32 @@
+"""
+Batch Feature Analytical Pipeline Engine (DuckDB & Hive Lakehouse).
+
+Computes 7d and 30d windowed aggregations over historical transactions using DuckDB,
+exports Hive-partitioned Parquet files, and syncs Lakehouse partitions to MinIO S3.
+"""
+
 import os
 import sys
 import time
-import logging
 from datetime import datetime, timezone
 import duckdb
-import pandas as pd
 from dotenv import load_dotenv
 
+from src.config.settings import settings
+from src.utils.logger import get_logger
+
 load_dotenv()
+logger = get_logger("batch_feature_job")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger("batch_feature_job")
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-DEFAULT_DATASET_PATH = os.getenv(
-    "DATASET_PATH",
-    os.path.join(PROJECT_DIR, "data", "train_transaction.csv")
-)
-
-# Lakehouse Hive Partitioned Path: data/lakehouse/batch_features/
-LAKEHOUSE_BASE_DIR = os.path.join(PROJECT_DIR, "data", "lakehouse", "batch_features")
-FALLBACK_PARQUET_PATH = os.path.join(PROJECT_DIR, "data", "batch_features.parquet")
-
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "localhost:9000").replace("http://", "").replace("https://", "")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadminpassword")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET", "feature-store-offline")
-
-def upload_folder_to_minio(local_folder: str, bucket_name: str, minio_prefix: str = "batch_features"):
+def upload_folder_to_minio(local_folder: str, bucket_name: str, minio_prefix: str = "batch_features") -> None:
     """Recursively uploads local Hive-partitioned Parquet files to MinIO S3 Lakehouse bucket."""
     try:
         from minio import Minio
         client = Minio(
-            MINIO_ENDPOINT,
-            access_key=MINIO_ACCESS_KEY,
-            secret_key=MINIO_SECRET_KEY,
+            settings.minio_endpoint,
+            access_key=settings.minio_access_key,
+            secret_key=settings.minio_secret_key,
             secure=False
         )
 
@@ -59,7 +47,8 @@ def upload_folder_to_minio(local_folder: str, bucket_name: str, minio_prefix: st
     except Exception as e:
         logger.warning(f"Failed to sync partitioned Lakehouse to MinIO S3: {e}")
 
-def run_batch_feature_pipeline(dataset_path: str = DEFAULT_DATASET_PATH):
+
+def run_batch_feature_pipeline(dataset_path: str = settings.raw_csv_path) -> str:
     """
     Executes DuckDB Batch Feature Pipeline with Hive Partitioning & DQ Gate Check:
     1. Reads raw transaction dataset into DuckDB.
@@ -77,7 +66,7 @@ def run_batch_feature_pipeline(dataset_path: str = DEFAULT_DATASET_PATH):
     month_str = f"{now.month:02d}"
     day_str = f"{now.day:02d}"
 
-    partition_dir = os.path.join(LAKEHOUSE_BASE_DIR, f"year={year_str}", f"month={month_str}", f"day={day_str}")
+    partition_dir = os.path.join(settings.lakehouse_base_dir, f"year={year_str}", f"month={month_str}", f"day={day_str}")
     os.makedirs(partition_dir, exist_ok=True)
     partition_file = os.path.join(partition_dir, "batch_part_000.parquet")
 
@@ -119,12 +108,8 @@ def run_batch_feature_pipeline(dataset_path: str = DEFAULT_DATASET_PATH):
 
     logger.info(f"Computed batch features for {len(batch_features_df):,} unique cards.")
     
-    # -------------------------------------------------------------------------
-    # Pandera Data Quality Validation Gate
-    # -------------------------------------------------------------------------
-    sys.path.append(os.path.join(PROJECT_DIR, "src", "quality"))
     try:
-        from data_assert import validate_batch_dataframe
+        from src.quality.data_assert import validate_batch_dataframe
         is_valid, clean_df, error_df = validate_batch_dataframe(batch_features_df)
         if not is_valid:
             logger.warning("[DQ Gate Warning] Batch features contained invalid rows; proceed with sanitized DataFrame.")
@@ -132,24 +117,23 @@ def run_batch_feature_pipeline(dataset_path: str = DEFAULT_DATASET_PATH):
     except Exception as e:
         logger.warning(f"Could not run Pandera Data Quality Gate check: {e}")
 
-    # Export to Hive Partition File
     con.execute(f"COPY (SELECT * FROM batch_features_df) TO '{partition_file}' (FORMAT PARQUET);")
     
     # Also save single file for Feast default path compatibility
-    os.makedirs(os.path.dirname(FALLBACK_PARQUET_PATH), exist_ok=True)
-    con.execute(f"COPY (SELECT * FROM batch_features_df) TO '{FALLBACK_PARQUET_PATH}' (FORMAT PARQUET);")
+    os.makedirs(os.path.dirname(settings.batch_parquet_path), exist_ok=True)
+    con.execute(f"COPY (SELECT * FROM batch_features_df) TO '{settings.batch_parquet_path}' (FORMAT PARQUET);")
     con.close()
 
     elapsed = time.time() - start_time
     logger.info(f"Generated Hive Partitioned Parquet Lakehouse at '{partition_file}' in {elapsed:.2f}s.")
 
-    # Upload Hive Lakehouse to MinIO S3
     upload_folder_to_minio(
-        local_folder=LAKEHOUSE_BASE_DIR,
-        bucket_name=MINIO_BUCKET,
+        local_folder=settings.lakehouse_base_dir,
+        bucket_name=settings.minio_bucket,
         minio_prefix="batch_features"
     )
     return partition_file
+
 
 if __name__ == "__main__":
     run_batch_feature_pipeline()
