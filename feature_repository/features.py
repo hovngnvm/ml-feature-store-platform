@@ -12,9 +12,7 @@ import pandas as pd
 
 from entities import card_entity
 
-# -----------------------------------------------------------------------------
-# 1. Batch Feature Store Source & View (Historical 7d/30d/All-time Features)
-# -----------------------------------------------------------------------------
+# Batch Feature Store Source & View (Historical 7d/30d/All-time Features)
 batch_file_source = FileSource(
     name="batch_features_source",
     path="../data/batch_features.parquet",
@@ -37,9 +35,7 @@ card_batch_feature_view = FeatureView(
     source=batch_file_source
 )
 
-# -----------------------------------------------------------------------------
-# 2. Push / Stream Feature Store Source & View (PyFlink Real-Time Window Features)
-# -----------------------------------------------------------------------------
+# Push / Stream Feature Store Source & View (PyFlink Real-Time Window Features)
 stream_push_source = PushSource(
     name="stream_features_push_source",
     batch_source=batch_file_source
@@ -64,9 +60,7 @@ card_stream_feature_view = FeatureView(
     source=stream_push_source
 )
 
-# -----------------------------------------------------------------------------
-# 3. Request Data Source (Payload sent via REST API request)
-# -----------------------------------------------------------------------------
+# Request Data Source (Payload sent via REST API request)
 transaction_request_source = RequestSource(
     name="transaction_request_source",
     schema=[
@@ -74,9 +68,7 @@ transaction_request_source = RequestSource(
     ]
 )
 
-# -----------------------------------------------------------------------------
-# 4. Standalone On-Demand Transformation UDF
-# -----------------------------------------------------------------------------
+# Standalone On-Demand Transformation UDF
 @on_demand_feature_view(
     name="card_on_demand_features",
     sources=[
@@ -93,6 +85,10 @@ transaction_request_source = RequestSource(
     ]
 )
 def card_on_demand_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Computes real-time on-demand derived fraud risk indicators by joining
+    incoming transaction request payload with stream and batch feature vectors.
+    """
     out = pd.DataFrame()
     curr_amt = df["current_amount"]
     avg_24h = df["avg_amount_24h"].fillna(0.0)
