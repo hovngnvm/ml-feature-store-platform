@@ -277,12 +277,9 @@ ml-feature-store-platform/
 │   └── ensemble_fraud_model.joblib    # Trained model ensemble binary (XGBoost + LightGBM)
 │
 ├── tests/                             # Comprehensive Test Suite (pytest)
-│   ├── test_api.py                    # REST API endpoint tests
-│   ├── test_config.py                 # Settings loading tests
-│   ├── test_ml.py                     # ML pipeline unit tests
-│   ├── test_pipeline.py               # E2E pipeline integration tests
-│   ├── test_producer.py               # Kafka producer test suite
-│   └── test_utils.py                  # Utility module unit tests
+│   ├── test_quality_gate.py           # Pandera Schema Gate & Quarantine tests
+│   ├── test_ml_training.py            # Cost Matrix & Decision Threshold tests
+│   └── test_api_serving.py            # FastAPI REST API serving & inference tests
 │
 ├── docker-compose.yml                 # Full stack container configuration (Redpanda, Redis, MinIO, Prometheus, Grafana)
 ├── requirements.txt                   # Dependencies manifest
