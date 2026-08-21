@@ -4,14 +4,7 @@ Automated Model Serving API Test Suite.
 Verifies FastAPI health probe, online feature inference endpoints, and error handling.
 """
 
-import os
-import sys
 from fastapi.testclient import TestClient
-
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_DIR not in sys.path:
-    sys.path.insert(0, PROJECT_DIR)
-
 from src.api.main import app
 
 
