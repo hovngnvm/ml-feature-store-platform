@@ -18,7 +18,7 @@ def get_logger(name: str, level: int = logging.INFO, log_dir: Path | None = None
     if not logger.handlers:
         formatter = logging.Formatter(
             '[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            datefmt='%Y-%m-%dT%H:%M:%S%z'
         )
 
         console_handler = logging.StreamHandler(sys.stdout)

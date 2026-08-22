@@ -36,14 +36,7 @@ DRIFT_HTML_PATH = os.path.join(settings.dashboard_dir, "feature_drift_report.htm
 REDIS_HOST = settings.redis_host
 REDIS_PORT = settings.redis_port
 
-# Bind FraudModelEnsemble for joblib
-try:
-    from src.ml.train import FraudModelEnsemble
-    sys.modules['__main__'].FraudModelEnsemble = FraudModelEnsemble
-except Exception:
-    pass
-
-from typing import Any
+from src.ml.ensemble import FraudModelEnsemble
 
 @st.cache_resource
 def load_ensemble_model() -> Any:

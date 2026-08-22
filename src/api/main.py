@@ -13,30 +13,65 @@ import joblib
 import redis
 import numpy as np
 import pandas as pd
-from typing import Dict
-from dotenv import load_dotenv
-
+from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
 from src.config.settings import settings
 from src.utils.logger import get_logger
-from src.ml.train import FraudModelEnsemble
+from src.ml.ensemble import FraudModelEnsemble
+from src.utils.redis_client import get_redis_client, check_redis_health
 
-sys.modules['__main__'].FraudModelEnsemble = FraudModelEnsemble
-
-load_dotenv()
 logger = get_logger("fraud_serving_api")
+
+ensemble_model: FraudModelEnsemble | None = None
+feast_store = None
+redis_client = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Loads Ensemble Model Artifact, Feast Registry & Redis Client on API startup."""
+    global ensemble_model, feast_store, redis_client
+    logger.info("Initializing Model Serving API Resources...")
+
+    if Path(settings.model_artifact_path).exists():
+        try:
+            ensemble_model = joblib.load(settings.model_artifact_path)
+            th = getattr(ensemble_model, "optimal_threshold", 0.5)
+            logger.info(f"Ensemble Model loaded from '{settings.model_artifact_path}' (Optimal Decision Threshold: {th:.4f})")
+        except Exception as e:
+            logger.error(f"Failed to load Ensemble Model artifact: {e}")
+    else:
+        logger.warning(f"Ensemble Model artifact not found at '{settings.model_artifact_path}'. Run src/ml/train.py first.")
+
+    if Path(settings.feature_repo_dir).exists():
+        try:
+            from feast import FeatureStore
+            feast_store = FeatureStore(repo_path=settings.feature_repo_dir)
+            logger.info(f"Feast FeatureStore initialized from '{settings.feature_repo_dir}'")
+        except Exception as e:
+            logger.warning(f"Could not load Feast FeatureStore: {e}")
+
+    try:
+        redis_client = get_redis_client()
+        if check_redis_health():
+            logger.info(f"Redis direct connection established to {settings.redis_host}:{settings.redis_port}")
+    except Exception as e:
+        logger.warning(f"Redis direct connection notice: {e}")
+
+    yield
+
+    logger.info("Shutting down Model Serving API Resources...")
+
 
 app = FastAPI(
     title="Real-Time Fraud Detection Model Serving API",
     description="Low-latency REST API (< 5ms SLA) retrieving online features from Redis/Feast and predicting transaction fraud scores via Model Ensemble with Dynamic Threshold Tuning.",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
-
-ensemble_model = None
-feast_store = None
-redis_client = None
 
 
 class TransactionRequest(BaseModel):
@@ -53,42 +88,7 @@ class PredictionResponse(BaseModel):
     xgb_score: float
     lgb_score: float
     latency_ms: float
-    features_used: Dict[str, float]
-
-
-@app.on_event("startup")
-def load_serving_resources() -> None:
-    """Loads Ensemble Model Artifact, Feast Registry & Redis Client on API startup."""
-    global ensemble_model, feast_store, redis_client
-    logger.info("Initializing Model Serving API Resources...")
-
-    # Load Ensemble Model
-    if os.path.exists(settings.model_artifact_path):
-        try:
-            ensemble_model = joblib.load(settings.model_artifact_path)
-            th = getattr(ensemble_model, "optimal_threshold", 0.5)
-            logger.info(f"Ensemble Model loaded from '{settings.model_artifact_path}' (Optimal Decision Threshold: {th:.4f})")
-        except Exception as e:
-            logger.error(f"Failed to load Ensemble Model artifact: {e}")
-    else:
-        logger.warning(f"Ensemble Model artifact not found at '{settings.model_artifact_path}'. Run src/ml/train.py first.")
-
-    # Load Feast Store
-    if os.path.exists(settings.feature_repo_dir):
-        try:
-            from feast import FeatureStore
-            feast_store = FeatureStore(repo_path=settings.feature_repo_dir)
-            logger.info(f"Feast FeatureStore initialized from '{settings.feature_repo_dir}'")
-        except Exception as e:
-            logger.warning(f"Could not load Feast FeatureStore: {e}")
-
-    # Load Direct Redis Client
-    try:
-        redis_client = redis.Redis(host=settings.redis_host, port=settings.redis_port, decode_responses=True)
-        redis_client.ping()
-        logger.info(f"Redis direct connection established to {settings.redis_host}:{settings.redis_port}")
-    except Exception as e:
-        logger.warning(f"Redis direct connection notice: {e}")
+    features_used: dict[str, float]
 
 
 @app.get("/", tags=["Health"])
